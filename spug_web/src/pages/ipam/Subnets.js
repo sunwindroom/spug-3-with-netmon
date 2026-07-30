@@ -1,0 +1,122 @@
+/**
+ * Copyright (c) OpenSpug Organization. https://github.com/openspug/spug
+ * Copyright (c) <spug.dev@gmail.com>
+ * Released under the AGPL-3.0 License.
+ */
+import React, { useState } from 'react';
+import { observer } from 'mobx-react';
+import { Table, Space, Input, InputNumber, Form, Modal, message, Progress, Switch, Tag } from 'antd';
+import { SearchOutlined } from '@ant-design/icons';
+import { AuthButton, LinkButton } from 'components';
+import { http } from 'libs';
+import store from './store';
+
+export default observer(function Subnets() {
+  const [scanning, setScanning] = useState(null);
+
+  function handleDelete(record) {
+    Modal.confirm({
+      title: '删除确认', content: `确定要删除网段【${record.name}】吗？其下所有地址记录与审计日志也将被删除。`,
+      onOk: () => http.delete('/api/ipam/subnet/', { params: { id: record.id } })
+        .then(() => { message.success('删除成功'); store.fetchSubnets() })
+    })
+  }
+
+  function handleScan(record) {
+    setScanning(record.id);
+    store.startScan(record.id)
+      .then(({ message: msg }) => message.success(msg))
+      .finally(() => setScanning(null))
+  }
+
+  const columns = [
+    { title: '网段名称', dataIndex: 'name' },
+    { title: 'CIDR', dataIndex: 'cidr' },
+    { title: '分组', dataIndex: 'group_name', render: v => v || '-' },
+    { title: '网关', dataIndex: 'gateway', render: v => v || '-' },
+    {
+      title: '使用率', width: 200, render: (_, r) => (
+        <div>
+          <Progress
+            percent={r.usage_rate} size="small"
+            status={r.warning ? 'exception' : 'normal'}
+          />
+          <span style={{ fontSize: 12, color: '#8c8c8c' }}>{r.used_count}/{r.total_count}</span>
+          {r.warning && <Tag color="red" style={{ marginLeft: 4 }}>预警</Tag>}
+        </div>
+      )
+    },
+    { title: '未授权自动隔离', dataIndex: 'auto_isolate_unauthorized', render: v => v ? <Tag color="orange">已开启</Tag> : <Tag>未开启</Tag> },
+    {
+      title: '操作', width: 220, render: (_, r) => (
+        <Space>
+          <LinkButton onClick={() => { store.fetchAddresses(r.id); store.activeTab = 'addresses' }}>查看地址</LinkButton>
+          <AuthButton auth="ipam.subnet.edit" type="link" loading={scanning === r.id} icon={<SearchOutlined/>}
+                      onClick={() => handleScan(r)}>扫描</AuthButton>
+          <LinkButton onClick={() => store.showSubnetForm(r)}>编辑</LinkButton>
+          <AuthButton auth="ipam.subnet.del" type="link" danger onClick={() => handleDelete(r)}>删除</AuthButton>
+        </Space>
+      )
+    }
+  ];
+
+  return (
+    <div>
+      <Space style={{ marginBottom: 16 }}>
+        <AuthButton auth="ipam.subnet.add" type="primary" onClick={() => store.showSubnetForm()}>新建网段</AuthButton>
+      </Space>
+      <Table rowKey="id" loading={store.subnetFetching} columns={columns} dataSource={store.subnets}/>
+      {store.subnetFormVisible && <SubnetForm/>}
+    </div>
+  )
+})
+
+function SubnetForm() {
+  const [form] = Form.useForm();
+  const [saving, setSaving] = useState(false);
+  const record = store.subnet;
+
+  function handleSubmit() {
+    form.validateFields().then(values => {
+      setSaving(true);
+      http.post('/api/ipam/subnet/', { ...record, ...values })
+        .then(() => { message.success('保存成功'); store.subnetFormVisible = false; store.fetchSubnets() })
+        .finally(() => setSaving(false))
+    })
+  }
+
+  return (
+    <Modal
+      visible destroyOnClose title={record.id ? '编辑网段' : '新建网段'}
+      confirmLoading={saving} onOk={handleSubmit}
+      onCancel={() => store.subnetFormVisible = false}
+    >
+      <Form form={form} layout="vertical" initialValues={record}>
+        <Form.Item name="name" label="网段名称" rules={[{ required: true, message: '请输入网段名称' }]}>
+          <Input placeholder="例如：办公网段-3楼"/>
+        </Form.Item>
+        <Form.Item name="cidr" label="CIDR" rules={[{ required: true, message: '请输入CIDR' }]}>
+          <Input placeholder="例如：192.168.10.0/24" disabled={!!record.id}/>
+        </Form.Item>
+        <Form.Item name="gateway" label="网关地址">
+          <Input placeholder="例如：192.168.10.1"/>
+        </Form.Item>
+        <Form.Item name="vlan_id" label="VLAN ID">
+          <InputNumber style={{ width: '100%' }}/>
+        </Form.Item>
+        <Form.Item name="dns_servers" label="DNS服务器">
+          <Input placeholder="例如：8.8.8.8,114.114.114.114"/>
+        </Form.Item>
+        <Form.Item name="warning_threshold" label="使用率预警阈值(%)" initialValue={80}>
+          <InputNumber min={1} max={100} style={{ width: '100%' }}/>
+        </Form.Item>
+        <Form.Item name="auto_isolate_unauthorized" label="发现未授权设备后自动尝试隔离" valuePropName="checked" initialValue={false}>
+          <Switch/>
+        </Form.Item>
+        <Form.Item name="desc" label="备注">
+          <Input.TextArea rows={2}/>
+        </Form.Item>
+      </Form>
+    </Modal>
+  )
+}

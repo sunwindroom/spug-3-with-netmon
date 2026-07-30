@@ -1,0 +1,546 @@
+# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
+# Copyright: (c) <spug.dev@gmail.com>
+# Released under the AGPL-3.0 License.
+from django.views.generic import View
+from django.conf import settings
+from django.db.models import Count
+from django_redis import get_redis_connection
+from libs import json_response, JsonParser, Argument, human_datetime, auth
+from apps.netmon.models import (
+    NetGroup, Device, Link, MetricRecord, AlertRule, AnomalyEvent, Report, ReportRecord,
+    MaintenanceWindow, RemediationAction, RemediationLog
+)
+from apps.netmon import discovery, reports as report_builder, stats as stats_builder, collectors
+from threading import Thread
+from datetime import datetime, timedelta
+from statistics import mean
+import json
+import uuid
+import os
+import csv
+import io
+
+NETMON_KEY = settings.NETMON_KEY
+
+
+# ------------------------------------------------------------------ 分组 -----
+class GroupView(View):
+    @auth('netmon.device.view')
+    def get(self, request):
+        groups = NetGroup.objects.all()
+        return json_response([x.to_view() for x in groups])
+
+    @auth('netmon.device.edit')
+    def post(self, request):
+        form, error = JsonParser(
+            Argument('id', type=int, required=False),
+            Argument('name', help='请输入分组名称'),
+            Argument('parent_id', type=int, default=0),
+        ).parse(request.body)
+        if error is None:
+            if form.id:
+                NetGroup.objects.filter(pk=form.id).update(name=form.name, parent_id=form.parent_id)
+            else:
+                NetGroup.objects.create(**form)
+        return json_response(error=error)
+
+    @auth('netmon.device.del')
+    def delete(self, request):
+        form, error = JsonParser(Argument('id', type=int, help='请指定操作对象')).parse(request.GET)
+        if error is None:
+            NetGroup.objects.filter(pk=form.id).delete()
+        return json_response(error=error)
+
+
+# ------------------------------------------------------------------ 设备台账 -----
+class DeviceView(View):
+    @auth('netmon.device.view')
+    def get(self, request):
+        group_id = request.GET.get('group_id')
+        qs = Device.objects.all()
+        if group_id:
+            qs = qs.filter(group_id=group_id)
+        return json_response([x.to_view() for x in qs])
+
+    @auth('netmon.device.add|netmon.device.edit')
+    def post(self, request):
+        form, error = JsonParser(
+            Argument('id', type=int, required=False),
+            Argument('name', help='请输入设备名称'),
+            Argument('ip', help='请输入IP地址'),
+            Argument('category', default='server'),
+            Argument('group_id', type=int, required=False),
+            Argument('vendor', required=False),
+            Argument('model_name', required=False),
+            Argument('location', required=False),
+            Argument('monitor_type', default='ping'),
+            Argument('host_id', type=int, required=False),
+            Argument('snmp_version', default='2c'),
+            Argument('snmp_community', default='public'),
+            Argument('snmp_port', type=int, default=161),
+            Argument('rate', type=int, default=60),
+            Argument('desc', required=False),
+        ).parse(request.body)
+        if error is None:
+            device_id = form.pop('id', None)
+            rds_cli = get_redis_connection()
+            if device_id:
+                Device.objects.filter(pk=device_id).update(**form)
+            else:
+                device = Device.objects.create(created_by=request.user, **form)
+                device_id = device.id
+            rds_cli.lpush(NETMON_KEY, json.dumps({'action': 'modify', 'id': device_id, 'rate': form.rate}))
+        return json_response(error=error)
+
+    @auth('netmon.device.edit')
+    def patch(self, request):
+        form, error = JsonParser(
+            Argument('id', type=int, help='请指定操作对象'),
+            Argument('is_active', type=bool, required=False),
+        ).parse(request.body, True)
+        if error is None:
+            Device.objects.filter(pk=form.id).update(**form)
+            device = Device.objects.filter(pk=form.id).first()
+            rds_cli = get_redis_connection()
+            if device and device.is_active:
+                rds_cli.lpush(NETMON_KEY, json.dumps({'action': 'modify', 'id': device.id, 'rate': device.rate}))
+            else:
+                rds_cli.lpush(NETMON_KEY, json.dumps({'action': 'remove', 'id': form.id}))
+        return json_response(error=error)
+
+    @auth('netmon.device.del')
+    def delete(self, request):
+        form, error = JsonParser(Argument('id', type=int, help='请指定操作对象')).parse(request.GET)
+        if error is None:
+            Device.objects.filter(pk=form.id).delete()
+            rds_cli = get_redis_connection()
+            rds_cli.lpush(NETMON_KEY, json.dumps({'action': 'remove', 'id': form.id}))
+        return json_response(error=error)
+
+
+@auth('netmon.device.del')
+def batch_delete_devices(request):
+    form, error = JsonParser(Argument('ids', type=list, help='请选择要删除的设备')).parse(request.body)
+    if error:
+        return json_response(error=error)
+    rds_cli = get_redis_connection()
+    count = Device.objects.filter(pk__in=form.ids).count()
+    Device.objects.filter(pk__in=form.ids).delete()
+    for device_id in form.ids:
+        rds_cli.lpush(NETMON_KEY, json.dumps({'action': 'remove', 'id': device_id}))
+    return json_response({'deleted': count})
+
+
+@auth('netmon.device.add')
+def import_devices_csv(request):
+    """批量导入设备：CSV 表头 name,ip,category,monitor_type,group_id（后三列可留空使用默认值），
+    便于管理员从 Excel/其它CMDB系统导出的资产清单快速批量录入，避免逐台手工创建。
+    """
+    file = request.FILES.get('file')
+    if not file:
+        return json_response(error='请上传CSV文件')
+    try:
+        text = file.read().decode('utf-8-sig')
+    except UnicodeDecodeError:
+        text = file.read().decode('gbk', errors='ignore')
+    reader = csv.DictReader(io.StringIO(text))
+    created, skipped, errors = 0, 0, []
+    valid_categories = {c for c, _ in Device.CATEGORIES}
+    for i, row in enumerate(reader, 2):
+        name, ip = (row.get('name') or '').strip(), (row.get('ip') or '').strip()
+        if not name or not ip:
+            errors.append(f'第{i}行：name/ip 不能为空')
+            continue
+        if Device.objects.filter(ip=ip).exists():
+            skipped += 1
+            continue
+        category = row.get('category', 'server').strip() or 'server'
+        if category not in valid_categories:
+            category = 'other'
+        Device.objects.create(
+            name=name, ip=ip, category=category,
+            monitor_type=row.get('monitor_type', 'ping').strip() or 'ping',
+            group_id=row.get('group_id') or None,
+            created_by=request.user,
+        )
+        created += 1
+    return json_response({'created': created, 'skipped': skipped, 'errors': errors})
+
+
+@auth('netmon.device.view')
+def test_connectivity(request):
+    """新建/编辑设备时"一键测试连通性"：立即执行一次采集，便于快速验证IP/凭据/SNMP团体字是否配置正确"""
+    form, error = JsonParser(
+        Argument('id', type=int, required=False),
+        Argument('ip', help='请输入IP地址'),
+        Argument('monitor_type', default='ping'),
+        Argument('snmp_community', default='public'),
+        Argument('snmp_port', type=int, default=161),
+        Argument('host_id', type=int, required=False),
+    ).parse(request.body)
+    if error:
+        return json_response(error=error)
+    if form.id:
+        device = Device.objects.filter(pk=form.id).first()
+    else:
+        device = Device(
+            ip=form.ip, monitor_type=form.monitor_type, snmp_community=form.snmp_community,
+            snmp_port=form.snmp_port, host_id=form.host_id
+        )
+    if not device:
+        return json_response(error='设备不存在')
+    try:
+        result = collectors.collect(device)
+    except Exception as e:
+        return json_response({'success': False, 'message': str(e)})
+    if result is None:
+        return json_response({'success': False, 'message': '未采集到任何数据，请检查IP可达性/凭据/SNMP配置'})
+    return json_response({'success': True, 'metrics': result})
+
+
+# ------------------------------------------------------------------ 拓扑 -----
+class TopologyView(View):
+    @auth('netmon.device.view')
+    def get(self, request):
+        group_id = request.GET.get('group_id')
+        devices = Device.objects.all()
+        if group_id:
+            devices = devices.filter(group_id=group_id)
+        device_ids = list(devices.values_list('id', flat=True))
+        links = Link.objects.filter(source_id__in=device_ids, target_id__in=device_ids)
+        nodes = [{
+            'id': d.id, 'name': d.name, 'ip': d.ip, 'category': d.category,
+            'status': d.status, 'monitor_type': d.monitor_type,
+        } for d in devices]
+        edges = [x.to_view() for x in links]
+        return json_response({'nodes': nodes, 'edges': edges})
+
+    @auth('netmon.device.edit')
+    def post(self, request):
+        form, error = JsonParser(
+            Argument('source', type=int, help='请选择起始设备'),
+            Argument('target', type=int, help='请选择目标设备'),
+            Argument('link_type', default='physical'),
+            Argument('bandwidth_mbps', type=int, required=False),
+            Argument('desc', required=False),
+        ).parse(request.body)
+        if error is None:
+            Link.objects.create(source_id=form.source, target_id=form.target, link_type=form.link_type,
+                                 bandwidth_mbps=form.bandwidth_mbps, desc=form.desc)
+        return json_response(error=error)
+
+    @auth('netmon.device.edit')
+    def delete(self, request):
+        form, error = JsonParser(Argument('id', type=int, help='请指定操作对象')).parse(request.GET)
+        if error is None:
+            Link.objects.filter(pk=form.id).delete()
+        return json_response(error=error)
+
+
+# ------------------------------------------------------------------ 实时总览大屏 -----
+@auth('netmon.device.view')
+def get_overview(request):
+    devices = Device.objects.all()
+    status_counts = {'online': 0, 'warning': 0, 'critical': 0, 'offline': 0, 'unknown': 0}
+    category_counts = {}
+    for d in devices:
+        status_counts[d.status] = status_counts.get(d.status, 0) + 1
+        category_counts[d.category] = category_counts.get(d.category, 0) + 1
+
+    recent_since = (datetime.now() - timedelta(minutes=15)).strftime('%Y-%m-%d %H:%M:%S')
+    top_anomalies = AnomalyEvent.objects.filter(
+        status='open', created_at__gte=recent_since
+    ).order_by('-id')[:10]
+
+    cpu_avg = MetricRecord.objects.filter(
+        metric_key='cpu', collected_at__gte=datetime.now() - timedelta(minutes=10)
+    ).values_list('value', flat=True)
+    mem_avg = MetricRecord.objects.filter(
+        metric_key='memory', collected_at__gte=datetime.now() - timedelta(minutes=10)
+    ).values_list('value', flat=True)
+
+    since_7d = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+    now_str = human_datetime()
+    all_devices = list(devices)
+    mttr = stats_builder.compute_mttr(all_devices, since_7d, now_str)
+    avail = stats_builder.availability_rate(all_devices, since_7d, now_str)
+    trend = stats_builder.anomaly_trend(all_devices, days=14)
+    top_faulty = stats_builder.top_faulty_devices(all_devices, since_7d, now_str, limit=5)
+
+    return json_response({
+        'device_total': devices.count(),
+        'status_counts': status_counts,
+        'category_counts': category_counts,
+        'fleet_cpu_avg': round(mean(cpu_avg), 2) if cpu_avg else None,
+        'fleet_mem_avg': round(mean(mem_avg), 2) if mem_avg else None,
+        'top_anomalies': [x.to_view() for x in top_anomalies],
+        'mttr_minutes': mttr,
+        'availability_rate': avail,
+        'anomaly_trend': trend,
+        'top_faulty_7d': top_faulty,
+    })
+
+
+# ------------------------------------------------------------------ 历史指标查询 -----
+@auth('netmon.device.view')
+def get_metric_history(request):
+    form, error = JsonParser(
+        Argument('device_id', type=int, help='请指定设备'),
+        Argument('metric_key', help='请指定指标'),
+        Argument('minutes', type=int, default=60),
+    ).parse(request.GET)
+    if error:
+        return json_response(error=error)
+    since = datetime.now() - timedelta(minutes=form.minutes)
+    records = MetricRecord.objects.filter(
+        device_id=form.device_id, metric_key=form.metric_key, collected_at__gte=since
+    ).order_by('collected_at')
+    return json_response([
+        {'time': x.collected_at.strftime('%Y-%m-%d %H:%M:%S'), 'value': x.value} for x in records
+    ])
+
+
+# ------------------------------------------------------------------ 异常事件 -----
+class AnomalyView(View):
+    @auth('netmon.device.view')
+    def get(self, request):
+        qs = AnomalyEvent.objects.all()
+        status = request.GET.get('status')
+        if status:
+            qs = qs.filter(status=status)
+        return json_response([x.to_view() for x in qs[:500]])
+
+    @auth('netmon.device.edit')
+    def patch(self, request):
+        form, error = JsonParser(
+            Argument('id', type=int, help='请指定操作对象'),
+            Argument('status', help='请指定状态'),
+        ).parse(request.body)
+        if error is None:
+            data = {'status': form.status}
+            if form.status == 'resolved':
+                data['resolved_at'] = human_datetime()
+            AnomalyEvent.objects.filter(pk=form.id).update(**data)
+        return json_response(error=error)
+
+
+# ------------------------------------------------------------------ 告警规则 -----
+class AlertRuleView(View):
+    @auth('netmon.device.view')
+    def get(self, request):
+        return json_response([x.to_view() for x in AlertRule.objects.all()])
+
+    @auth('netmon.device.edit')
+    def post(self, request):
+        form, error = JsonParser(
+            Argument('id', type=int, required=False),
+            Argument('name', help='请输入规则名称'),
+            Argument('group_id', type=int, required=False),
+            Argument('device_id', type=int, required=False),
+            Argument('metric_key', help='请选择监控指标'),
+            Argument('operator', help='请选择比较符'),
+            Argument('threshold', type=float, help='请输入阈值'),
+            Argument('consecutive_times', type=int, default=1),
+            Argument('level', default='warning'),
+            Argument('notify_grp', type=list, default=[]),
+            Argument('notify_mode', type=list, default=[]),
+        ).parse(request.body)
+        if error is None:
+            form.notify_grp = json.dumps(form.notify_grp)
+            form.notify_mode = json.dumps(form.notify_mode)
+            if form.id:
+                AlertRule.objects.filter(pk=form.id).update(**{k: v for k, v in form.items() if k != 'id'})
+            else:
+                AlertRule.objects.create(created_by=request.user, **{k: v for k, v in form.items() if k != 'id'})
+        return json_response(error=error)
+
+    @auth('netmon.device.del')
+    def delete(self, request):
+        form, error = JsonParser(Argument('id', type=int, help='请指定操作对象')).parse(request.GET)
+        if error is None:
+            AlertRule.objects.filter(pk=form.id).delete()
+        return json_response(error=error)
+
+
+# ------------------------------------------------------------------ 自动发现 -----
+@auth('netmon.device.add')
+def start_discovery(request):
+    form, error = JsonParser(Argument('cidr', help='请输入待扫描网段，如 192.168.1.0/24')).parse(request.body)
+    if error:
+        return json_response(error=error)
+    task_id = uuid.uuid4().hex[:12]
+    Thread(target=discovery.scan_network, args=(task_id, form.cidr), daemon=True).start()
+    return json_response({'task_id': task_id})
+
+
+@auth('netmon.device.view')
+def get_discovery_result(request):
+    task_id = request.GET.get('task_id')
+    if not task_id:
+        return json_response(error='请指定 task_id')
+    return json_response(discovery.get_scan_result(task_id))
+
+
+@auth('netmon.device.add')
+def import_discovery(request):
+    form, error = JsonParser(
+        Argument('items', type=list, help='请选择要导入的设备'),
+        Argument('group_id', type=int, required=False),
+    ).parse(request.body)
+    if error:
+        return json_response(error=error)
+    created = 0
+    for item in form.items:
+        if Device.objects.filter(ip=item['ip']).exists():
+            continue
+        Device.objects.create(
+            name=item.get('hostname') or item['ip'], ip=item['ip'],
+            category=item.get('category_guess', 'other'), group_id=form.group_id,
+            monitor_type='ping', created_by=request.user
+        )
+        created += 1
+    return json_response({'created': created})
+
+
+# ------------------------------------------------------------------ 维护窗口 -----
+class MaintenanceWindowView(View):
+    @auth('netmon.device.view')
+    def get(self, request):
+        return json_response([x.to_view() for x in MaintenanceWindow.objects.all()])
+
+    @auth('netmon.device.edit')
+    def post(self, request):
+        form, error = JsonParser(
+            Argument('id', type=int, required=False),
+            Argument('name', help='请输入维护窗口名称'),
+            Argument('group_id', type=int, required=False),
+            Argument('device_id', type=int, required=False),
+            Argument('start_at', help='请选择开始时间'),
+            Argument('end_at', help='请选择结束时间'),
+            Argument('reason', required=False),
+        ).parse(request.body)
+        if error is None:
+            device_id = form.pop('id', None)
+            if device_id:
+                MaintenanceWindow.objects.filter(pk=device_id).update(**form)
+            else:
+                MaintenanceWindow.objects.create(created_by=request.user, **form)
+        return json_response(error=error)
+
+    @auth('netmon.device.del')
+    def delete(self, request):
+        form, error = JsonParser(Argument('id', type=int, help='请指定操作对象')).parse(request.GET)
+        if error is None:
+            MaintenanceWindow.objects.filter(pk=form.id).delete()
+        return json_response(error=error)
+
+
+# ------------------------------------------------------------------ 自动化处置 -----
+class RemediationActionView(View):
+    @auth('netmon.device.view')
+    def get(self, request):
+        return json_response([x.to_view() for x in RemediationAction.objects.all()])
+
+    @auth('netmon.device.edit')
+    def post(self, request):
+        form, error = JsonParser(
+            Argument('id', type=int, required=False),
+            Argument('name', help='请输入处置动作名称'),
+            Argument('device_id', type=int, required=False),
+            Argument('group_id', type=int, required=False),
+            Argument('metric_key', required=False),
+            Argument('level', default='critical'),
+            Argument('script', help='请输入处置脚本内容'),
+            Argument('cooldown_minutes', type=int, default=15),
+        ).parse(request.body)
+        if error is None:
+            action_id = form.pop('id', None)
+            if action_id:
+                RemediationAction.objects.filter(pk=action_id).update(**form)
+            else:
+                RemediationAction.objects.create(created_by=request.user, **form)
+        return json_response(error=error)
+
+    @auth('netmon.device.del')
+    def delete(self, request):
+        form, error = JsonParser(Argument('id', type=int, help='请指定操作对象')).parse(request.GET)
+        if error is None:
+            RemediationAction.objects.filter(pk=form.id).delete()
+        return json_response(error=error)
+
+
+@auth('netmon.device.view')
+def get_remediation_logs(request):
+    qs = RemediationLog.objects.all()[:300]
+    return json_response([x.to_view() for x in qs])
+
+
+# ------------------------------------------------------------------ 报表管理 -----
+class ReportView(View):
+    @auth('netmon.report.view')
+    def get(self, request):
+        return json_response([x.to_view() for x in Report.objects.all()])
+
+    @auth('netmon.report.edit')
+    def post(self, request):
+        form, error = JsonParser(
+            Argument('id', type=int, required=False),
+            Argument('name', help='请输入报表名称'),
+            Argument('report_type', default='daily'),
+            Argument('group_id', type=int, required=False),
+            Argument('recipients', type=list, default=[]),
+        ).parse(request.body)
+        if error is None:
+            form.recipients = json.dumps(form.recipients)
+            if form.id:
+                Report.objects.filter(pk=form.id).update(**{k: v for k, v in form.items() if k != 'id'})
+            else:
+                Report.objects.create(created_by=request.user, **{k: v for k, v in form.items() if k != 'id'})
+        return json_response(error=error)
+
+    @auth('netmon.report.del')
+    def delete(self, request):
+        form, error = JsonParser(Argument('id', type=int, help='请指定操作对象')).parse(request.GET)
+        if error is None:
+            Report.objects.filter(pk=form.id).delete()
+        return json_response(error=error)
+
+
+@auth('netmon.report.edit')
+def generate_report(request):
+    form, error = JsonParser(
+        Argument('id', type=int, help='请指定报表'),
+        Argument('period_start', required=False),
+        Argument('period_end', required=False),
+    ).parse(request.body)
+    if error:
+        return json_response(error=error)
+    report = Report.objects.filter(pk=form.id).first()
+    if not report:
+        return json_response(error='报表不存在')
+    period_end = form.period_end or human_datetime()
+    period_start = form.period_start or (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d %H:%M:%S')
+    record = report_builder.build_report(report, period_start, period_end)
+    return json_response(record.to_view())
+
+
+@auth('netmon.report.view')
+def get_report_records(request):
+    report_id = request.GET.get('report_id')
+    qs = ReportRecord.objects.all()
+    if report_id:
+        qs = qs.filter(report_id=report_id)
+    return json_response([x.to_view() for x in qs[:200]])
+
+
+@auth('netmon.report.view')
+def download_report(request):
+    record_id = request.GET.get('id')
+    record = ReportRecord.objects.filter(pk=record_id).first()
+    if not record or not os.path.exists(record.file_path):
+        return json_response(error='报表文件不存在')
+    from django.http import FileResponse
+    return FileResponse(
+        open(record.file_path, 'rb'), as_attachment=True,
+        filename=os.path.basename(record.file_path)
+    )

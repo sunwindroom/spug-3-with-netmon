@@ -485,20 +485,36 @@ fi
 
 def seed_templates():
     """返回 (created, skipped)。找不到任何用户时返回 (0, 0) 并静默跳过（例如首次 migrate 时账号尚未创建）。"""
+    import json
     from apps.account.models import User
     from apps.exec.models import ExecTemplate
+    try:
+        from apps.exec.management.commands.monitor_templates_data import MONITOR_TEMPLATES
+    except ImportError:
+        MONITOR_TEMPLATES = []
 
     operator = User.objects.filter(is_supper=True).first() or User.objects.first()
     if not operator:
         return 0, 0
+
+    all_templates = list(TEMPLATES)
+    seen_names = {t['name'] for t in all_templates}
+    for tpl in MONITOR_TEMPLATES:
+        if tpl['name'] not in seen_names:
+            all_templates.append(tpl)
+            seen_names.add(tpl['name'])
+
     created, skipped = 0, 0
-    for tpl in TEMPLATES:
+    for tpl in all_templates:
         if ExecTemplate.objects.filter(name=tpl['name']).exists():
             skipped += 1
             continue
+        params = tpl.get('parameters', [])
         ExecTemplate.objects.create(
             name=tpl['name'], type=tpl['type'], body=tpl['body'].strip() + '\n',
-            interpreter=tpl['interpreter'], desc=tpl['desc'], created_by=operator
+            interpreter=tpl['interpreter'], desc=tpl['desc'],
+            parameters=json.dumps(params) if params else '[]',
+            created_by=operator
         )
         created += 1
     return created, skipped

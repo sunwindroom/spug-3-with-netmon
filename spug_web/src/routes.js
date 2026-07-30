@@ -57,7 +57,7 @@ export default [
   },
   {
     icon: <DashboardOutlined/>,
-    title: 'Dashboard',
+    title: '仪表盘',
     auth: 'dashboard.dashboard.view',
     path: '/dashboard',
     component: DashboardIndex

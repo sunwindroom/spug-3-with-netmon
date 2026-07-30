@@ -5,7 +5,11 @@ from django.views.generic import View
 from libs import json_response, JsonParser, Argument, auth
 from apps.ipam.models import Subnet, IPAddress, IPChangeLog, IsolationTemplate
 from apps.ipam import allocator, predictor, scanner, isolation, ipcalc
+from apps.netmon.models import Device, NetGroup
+from apps.host.models import Host
 from threading import Thread
+import uuid
+import json
 
 
 # ------------------------------------------------------------------ 网段管理 -----
@@ -184,8 +188,68 @@ def start_scan(request):
     subnet = Subnet.objects.filter(pk=form.subnet_id).first()
     if not subnet:
         return json_response(error='网段不存在')
-    Thread(target=scanner.scan_subnet, args=(subnet,), daemon=True).start()
-    return json_response({'message': '扫描任务已启动，请稍后在「未授权设备/冲突」中查看结果'})
+    try:
+        scan_results, findings = scanner.scan_subnet(subnet)
+    except Exception as e:
+        return json_response(error=f'扫描失败: {str(e)}')
+    return json_response({'scan_results': scan_results, 'findings': findings})
+
+
+# ------------------------------------------------------------------ 导入发现设备 -----
+@auth('ipam.subnet.edit')
+def import_discovery(request):
+    form, error = JsonParser(
+        Argument('subnet_id', type=int, help='请选择网段'),
+        Argument('devices', type=list, help='请选择要导入的设备'),
+    ).parse(request.body)
+    if error:
+        return json_response(error=error)
+    subnet = Subnet.objects.filter(pk=form.subnet_id).first()
+    if not subnet:
+        return json_response(error='网段不存在')
+    imported = []
+    for item in form.devices:
+        address = item.get('address')
+        if not address:
+            continue
+        category = item.get('category_guess', 'other')
+        hostname = item.get('hostname') or address
+        host_obj = Host.objects.filter(hostname=hostname).first()
+        if not host_obj:
+            host_obj = Host.objects.create(
+                hostname=hostname,
+                type='linux' if category in ('server', 'database', 'application') else 'switch',
+                desc=f'由IPAM扫描自动导入，网段: {subnet.name}',
+            )
+        group_id = item.get('group_id')
+        if group_id:
+            group = NetGroup.objects.filter(pk=group_id).first()
+        else:
+            group = NetGroup.objects.filter(name='默认分组').first()
+        if not group:
+            group = NetGroup.objects.create(name='默认分组')
+        device_obj = Device.objects.filter(host_id=host_obj.id).first()
+        if not device_obj:
+            device_obj = Device.objects.create(
+                name=hostname,
+                host_id=host_obj.id,
+                group_id=group.id,
+                category=category,
+            )
+        ip_obj = IPAddress.objects.filter(subnet=subnet, address=address).first()
+        if ip_obj:
+            IPAddress.objects.filter(pk=ip_obj.id).update(
+                status='allocated', device_id=device_obj.id, hostname=hostname,
+                mac_address=item.get('mac') or ip_obj.mac_address,
+            )
+        else:
+            IPAddress.objects.create(
+                subnet=subnet, address=address, status='allocated',
+                device_id=device_obj.id, hostname=hostname,
+                mac_address=item.get('mac'),
+            )
+        imported.append({'address': address, 'hostname': hostname, 'device_id': device_obj.id})
+    return json_response({'imported': imported, 'count': len(imported)})
 
 
 # ------------------------------------------------------------------ 预测性洞察 -----

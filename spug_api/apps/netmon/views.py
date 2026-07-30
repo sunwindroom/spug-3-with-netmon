@@ -384,13 +384,13 @@ def get_discovery_result(request):
 @auth('netmon.device.add')
 def import_discovery(request):
     form, error = JsonParser(
-        Argument('items', type=list, help='请选择要导入的设备'),
+        Argument('devices', type=list, help='请选择要导入的设备'),
         Argument('group_id', type=int, required=False),
     ).parse(request.body)
     if error:
         return json_response(error=error)
     created = 0
-    for item in form.items:
+    for item in form.devices:
         if Device.objects.filter(ip=item['ip']).exists():
             continue
         Device.objects.create(

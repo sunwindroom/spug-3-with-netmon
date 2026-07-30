@@ -9,7 +9,7 @@ import { UserOutlined, LockOutlined, CopyrightOutlined, GithubOutlined, MailOutl
 import styles from './login.module.css';
 import history from 'libs/history';
 import { http, updatePermissions } from 'libs';
-import logo from 'layout/logo-spug-txt.png';
+
 import envStore from 'pages/config/environment/store';
 import appStore from 'pages/config/app/store';
 import requestStore from 'pages/deploy/request/store';
@@ -97,8 +97,8 @@ export default function () {
   return (
     <div className={styles.container}>
       <div className={styles.titleContainer}>
-        <div><img className={styles.logo} src={logo} alt="logo"/></div>
-        <div className={styles.desc}>灵活、强大、易用的开源运维平台</div>
+        <div style={{ fontSize: 28, fontWeight: 700, color: '#1890ff', letterSpacing: 3 }}>监控运维平台</div>
+        <div className={styles.desc}>灵活、强大、易用的IT资源监控运维平台</div>
       </div>
       <div className={styles.formContainer}>
         <Tabs activeKey={loginType} className={styles.tabs} onTabClick={v => setLoginType(v)}>

@@ -59,7 +59,21 @@ class Store {
   isolate = (id, remark) => http.post('/api/ipam/address/isolate/', { id, remark });
   restore = (id, remark) => http.post('/api/ipam/address/restore/', { id, remark });
 
+  @observable scanResults = [];
+  @observable scanFindings = [];
+  @observable scanResultVisible = false;
+  @observable activeScanSubnetId = null;
+
   startScan = (subnetId) => http.post('/api/ipam/scan/start/', { subnet_id: subnetId });
+
+  importDiscovery = (subnetId, devices) => http.post('/api/ipam/scan/import/', { subnet_id: subnetId, devices });
+
+  showScanResult = (subnetId, results, findings) => {
+    this.activeScanSubnetId = subnetId;
+    this.scanResults = results || [];
+    this.scanFindings = findings || [];
+    this.scanResultVisible = true;
+  };
 
   fetchInsights = () => {
     this.insightsFetching = true;

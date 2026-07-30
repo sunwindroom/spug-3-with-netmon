@@ -138,7 +138,7 @@ class Store {
   };
 
   importDiscovery = (items, group_id) => {
-    return http.post('/api/netmon/discovery/import/', { items, group_id })
+    return http.post('/api/netmon/discovery/import/', { devices: items, group_id })
   };
 
   fetchReports = () => {

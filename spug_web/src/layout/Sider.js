@@ -3,7 +3,7 @@ import { Layout, Menu } from 'antd';
 import { hasPermission, history } from 'libs';
 import styles from './layout.module.less';
 import routes from '../routes';
-import logo from './logo-spug-white.png';
+
 
 let selectedKey = window.location.pathname;
 const OpenKeysMap = {};
@@ -56,7 +56,7 @@ export default function Sider(props) {
   return (
     <Layout.Sider width={208} collapsed={props.collapsed} className={styles.sider}>
       <div className={styles.logo}>
-        <img src={logo} alt="Logo"/>
+        <span style={{ color: '#fff', fontSize: 18, fontWeight: 600, letterSpacing: 2 }}>监控运维</span>
       </div>
       <div className={styles.menus} style={{height: `${document.body.clientHeight - 64}px`}}>
         <Menu

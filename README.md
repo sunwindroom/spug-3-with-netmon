@@ -37,9 +37,7 @@ Spug是面向中小型企业设计的轻量级无Agent的自动化运维平台�
 
 ## 安装
 
-[官方文档](https://ops.spug.cc/docs/install-docker)
-
-更多使用帮助请参考： [使用文档](https://ops.spug.cc/docs/host-manage/)
+初始账号和密码： admin / Spug2024Admin
 
 
 ## 推荐项目

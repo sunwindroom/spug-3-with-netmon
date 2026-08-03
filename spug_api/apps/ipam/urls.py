@@ -15,6 +15,7 @@ urlpatterns = [
     path('address/restore/', views.restore_address),
     path('security-events/', views.get_security_events),
     path('scan/start/', views.start_scan),
+    path('scan/test/', views.test_connection),
     path('scan/import/', views.import_discovery),
     path('insights/', views.get_insights),
     path('change-log/', views.get_change_logs),

@@ -5,7 +5,7 @@
  */
 import React, { useState } from 'react';
 import { observer } from 'mobx-react';
-import { Table, Space, Input, InputNumber, Form, Modal, message, Progress, Switch, Tag, Checkbox, Tooltip } from 'antd';
+import { Table, Space, Input, InputNumber, Form, Modal, message, Progress, Switch, Tag } from 'antd';
 import { SearchOutlined, ImportOutlined } from '@ant-design/icons';
 import { AuthButton, LinkButton } from 'components';
 import { http } from 'libs';
@@ -38,10 +38,18 @@ export default observer(function Subnets() {
           message.info('扫描完成，未发现存活主机');
         } else {
           message.success(`扫描完成，发现 ${results.length} 台存活主机`);
-          store.showScanResult(record.id, results, findings);
+          store.showScanResult(record.id, record.name, results, findings);
         }
       })
       .finally(() => setScanning(null))
+  }
+
+  function handleImport(record) {
+    if (store.scanResults.length > 0 && store.activeScanSubnetId === record.id) {
+      store.activeTab = 'scanResult';
+    } else {
+      message.info('请先执行扫描');
+    }
   }
 
   const columns = [
@@ -69,7 +77,7 @@ export default observer(function Subnets() {
           <AuthButton auth="ipam.subnet.edit" type="link" loading={scanning === r.id} icon={<SearchOutlined/>}
                       onClick={() => handleScan(r)}>扫描</AuthButton>
           <AuthButton auth="ipam.subnet.edit" type="link" icon={<ImportOutlined/>}
-                      onClick={() => store.scanResultVisible && store.activeScanSubnetId === r.id ? null : message.info('请先执行扫描')}>导入</AuthButton>
+                      onClick={() => handleImport(r)}>导入</AuthButton>
           <LinkButton onClick={() => store.showSubnetForm(r)}>编辑</LinkButton>
           <AuthButton auth="ipam.subnet.del" type="link" danger onClick={() => handleDelete(r)}>删除</AuthButton>
         </Space>
@@ -84,7 +92,6 @@ export default observer(function Subnets() {
       </Space>
       <Table rowKey="id" loading={store.subnetFetching} columns={columns} dataSource={store.subnets}/>
       {store.subnetFormVisible && <SubnetForm/>}
-      {store.scanResultVisible && <ScanResultModal/>}
     </div>
   )
 })
@@ -139,72 +146,3 @@ function SubnetForm() {
   )
 }
 
-function ScanResultModal() {
-  const [selectedKeys, setSelectedKeys] = useState([]);
-  const [importing, setImporting] = useState(false);
-  const results = store.scanResults;
-  const findings = store.scanFindings;
-
-  function handleImport() {
-    if (selectedKeys.length === 0) return message.warning('请选择要导入的设备');
-    const devices = results.filter(r => selectedKeys.includes(r.address));
-    setImporting(true);
-    store.importDiscovery(store.activeScanSubnetId, devices)
-      .then(res => {
-        message.success(`成功导入 ${res.count} 台设备`);
-        store.scanResultVisible = false;
-        store.fetchSubnets();
-      })
-      .finally(() => setImporting(false))
-  }
-
-  const columns = [
-    { title: 'IP地址', dataIndex: 'address', width: 140 },
-    { title: 'MAC地址', dataIndex: 'mac', width: 160, render: v => v || '-' },
-    {
-      title: '开放端口', dataIndex: 'open_ports', width: 200,
-      render: v => v && v.length > 0 ? v.join(', ') : '-'
-    },
-    {
-      title: '设备类型', dataIndex: 'category_guess', width: 100,
-      render: v => <Tag color="blue">{CATEGORY_MAP[v] || v || '未知'}</Tag>
-    },
-  ];
-
-  return (
-    <Modal
-      visible destroyOnClose title={`扫描结果（${results.length} 台存活主机）`}
-      width={720} footer={null}
-      onCancel={() => store.scanResultVisible = false}
-    >
-      {findings.length > 0 && (
-        <div style={{ marginBottom: 12 }}>
-          {findings.map((f, i) => (
-            <Tag key={i} color={f.type === 'unauthorized' ? 'orange' : 'red'} style={{ marginBottom: 4 }}>
-              {f.address}: {f.message}
-            </Tag>
-          ))}
-        </div>
-      )}
-      <Table
-        rowKey="address"
-        columns={columns}
-        dataSource={results}
-        size="small"
-        pagination={results.length > 10 ? { pageSize: 10 } : false}
-        rowSelection={{
-          selectedRowKeys: selectedKeys,
-          onChange: setSelectedKeys,
-        }}
-      />
-      <div style={{ marginTop: 12, textAlign: 'right' }}>
-        <Space>
-          <span>已选 {selectedKeys.length} 项</span>
-          <AuthButton auth="ipam.subnet.edit" type="primary" icon={<ImportOutlined/>}
-                      loading={importing} disabled={selectedKeys.length === 0}
-                      onClick={handleImport}>导入选中设备</AuthButton>
-        </Space>
-      </div>
-    </Modal>
-  )
-}

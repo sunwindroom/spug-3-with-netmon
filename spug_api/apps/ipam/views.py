@@ -192,12 +192,59 @@ def start_scan(request):
         scan_results, findings = scanner.scan_subnet(subnet)
     except Exception as e:
         return json_response(error=f'扫描失败: {str(e)}')
+    existing_hosts = {h.hostname for h in Host.objects.all()}
+    for item in scan_results:
+        item['registered'] = item['address'] in existing_hosts
     return json_response({'scan_results': scan_results, 'findings': findings})
+
+
+# ------------------------------------------------------------------ 测试连接 -----
+@auth('ipam.subnet.edit')
+def test_connection(request):
+    from apps.setting.utils import AppSetting
+    from libs.ssh import SSH, AuthenticationException
+    from paramiko.ssh_exception import BadAuthenticationType
+    import socket as _socket
+    form, error = JsonParser(
+        Argument('hostname', help='请输入主机名或IP'),
+        Argument('port', type=int, default=22),
+        Argument('username', default='root'),
+        Argument('password', required=False),
+        Argument('pkey', required=False),
+    ).parse(request.body)
+    if error:
+        return json_response(error=error)
+    try:
+        if form.pkey:
+            with SSH(form.hostname, form.port, form.username, form.pkey) as ssh:
+                ssh.ping()
+            return json_response({'ok': True, 'message': '密钥认证成功'})
+        private_key, _ = AppSetting.get_ssh_key()
+        if form.password:
+            try:
+                with SSH(form.hostname, form.port, form.username, password=form.password) as ssh:
+                    ssh.ping()
+                return json_response({'ok': True, 'message': '密码认证成功'})
+            except AuthenticationException:
+                pass
+        with SSH(form.hostname, form.port, form.username, private_key) as ssh:
+            ssh.ping()
+        return json_response({'ok': True, 'message': '全局密钥认证成功'})
+    except BadAuthenticationType:
+        return json_response({'ok': False, 'message': '不支持的认证方式'})
+    except AuthenticationException:
+        return json_response({'ok': False, 'message': '认证失败，请检查密码或密钥'})
+    except _socket.timeout:
+        return json_response({'ok': False, 'message': '连接超时，请检查网络'})
+    except Exception as e:
+        return json_response({'ok': False, 'message': f'连接失败: {str(e)}'})
 
 
 # ------------------------------------------------------------------ 导入发现设备 -----
 @auth('ipam.subnet.edit')
 def import_discovery(request):
+    from apps.host.models import Group as HostGroup
+    from apps.account.models import User
     form, error = JsonParser(
         Argument('subnet_id', type=int, help='请选择网段'),
         Argument('devices', type=list, help='请选择要导入的设备'),
@@ -207,49 +254,93 @@ def import_discovery(request):
     subnet = Subnet.objects.filter(pk=form.subnet_id).first()
     if not subnet:
         return json_response(error='网段不存在')
+    current_user_id = None
+    try:
+        current_user_id = request.user.pk
+    except Exception:
+        pass
+    if not current_user_id:
+        try:
+            access_token = request.headers.get('x-token') or request.GET.get('x-token')
+            if access_token:
+                current_user_id = User.objects.filter(access_token=access_token, is_active=True).values_list('id', flat=True).first()
+        except Exception:
+            pass
+    if not current_user_id:
+        current_user_id = User.objects.filter(is_supper=True).values_list('id', flat=True).first()
     imported = []
+    errors = []
     for item in form.devices:
         address = item.get('address')
         if not address:
             continue
         category = item.get('category_guess', 'other')
-        hostname = item.get('hostname') or address
-        host_obj = Host.objects.filter(hostname=hostname).first()
-        if not host_obj:
-            host_obj = Host.objects.create(
-                hostname=hostname,
-                type='linux' if category in ('server', 'database', 'application') else 'switch',
-                desc=f'由IPAM扫描自动导入，网段: {subnet.name}',
-            )
-        group_id = item.get('group_id')
-        if group_id:
-            group = NetGroup.objects.filter(pk=group_id).first()
+        host_name = item.get('host_name') or address
+        host_hostname = item.get('host_hostname') or address
+        host_port = item.get('host_port') or 22
+        host_username = item.get('host_username') or 'root'
+        host_pkey = item.get('host_pkey') or ''
+        host_password = item.get('host_password') or ''
+        host_group_id = item.get('host_group_id')
+        existing = Host.objects.filter(hostname=host_hostname, port=host_port).first()
+        if existing:
+            errors.append(f'{address}: 主机已存在（{existing.name}），跳过')
+            continue
+        host_obj = Host.objects.create(
+            name=host_name,
+            hostname=host_hostname,
+            port=host_port,
+            username=host_username,
+            pkey=host_pkey if host_pkey else None,
+            desc=f'由IPAM扫描导入，网段: {subnet.name}',
+            created_by_id=current_user_id,
+            is_verified=False,
+        )
+        if host_password:
+            try:
+                from apps.setting.utils import AppSetting
+                from libs.ssh import SSH
+                _, public_key = AppSetting.get_ssh_key()
+                with SSH(host_hostname, host_port, host_username, password=host_password) as ssh:
+                    ssh.add_public_key(public_key)
+                Host.objects.filter(pk=host_obj.id).update(is_verified=True)
+            except Exception:
+                pass
+        if host_group_id:
+            hg = HostGroup.objects.filter(pk=host_group_id).first()
+            if hg:
+                hg.hosts.add(host_obj)
         else:
-            group = NetGroup.objects.filter(name='默认分组').first()
-        if not group:
-            group = NetGroup.objects.create(name='默认分组')
+            default_grp = HostGroup.objects.first()
+            if default_grp:
+                default_grp.hosts.add(host_obj)
+        net_group = NetGroup.objects.filter(name='默认分组').first()
+        if not net_group:
+            net_group = NetGroup.objects.create(name='默认分组')
         device_obj = Device.objects.filter(host_id=host_obj.id).first()
         if not device_obj:
             device_obj = Device.objects.create(
-                name=hostname,
+                name=host_name,
+                ip=address,
                 host_id=host_obj.id,
-                group_id=group.id,
+                group_id=net_group.id,
                 category=category,
+                created_by_id=current_user_id,
             )
         ip_obj = IPAddress.objects.filter(subnet=subnet, address=address).first()
         if ip_obj:
             IPAddress.objects.filter(pk=ip_obj.id).update(
-                status='allocated', device_id=device_obj.id, hostname=hostname,
+                status='allocated', device_id=device_obj.id, hostname=host_name,
                 mac_address=item.get('mac') or ip_obj.mac_address,
             )
         else:
             IPAddress.objects.create(
                 subnet=subnet, address=address, status='allocated',
-                device_id=device_obj.id, hostname=hostname,
+                device_id=device_obj.id, hostname=host_name,
                 mac_address=item.get('mac'),
             )
-        imported.append({'address': address, 'hostname': hostname, 'device_id': device_obj.id})
-    return json_response({'imported': imported, 'count': len(imported)})
+        imported.append({'address': address, 'host_name': host_name, 'host_id': host_obj.id, 'device_id': device_obj.id})
+    return json_response({'imported': imported, 'count': len(imported), 'errors': errors})
 
 
 # ------------------------------------------------------------------ 预测性洞察 -----

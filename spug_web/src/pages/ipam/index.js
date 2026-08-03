@@ -9,6 +9,7 @@ import { Tabs } from 'antd';
 import { AuthDiv, Breadcrumb } from 'components';
 import Overview from './Overview';
 import Subnets from './Subnets';
+import ScanResult from './ScanResult';
 import Addresses from './Addresses';
 import SecurityEvents from './SecurityEvents';
 import IsolationTemplates from './IsolationTemplates';
@@ -29,6 +30,7 @@ export default observer(function IpamIndex() {
       <Tabs activeKey={store.activeTab} onChange={key => store.activeTab = key} type="card">
         <Tabs.TabPane tab="预测性洞察" key="overview"><Overview/></Tabs.TabPane>
         <Tabs.TabPane tab="网段管理" key="subnets"><Subnets/></Tabs.TabPane>
+        {store.scanResults.length > 0 && <Tabs.TabPane tab={`扫描结果(${store.scanResults.length})`} key="scanResult"><ScanResult/></Tabs.TabPane>}
         <Tabs.TabPane tab="地址分配" key="addresses"><Addresses/></Tabs.TabPane>
         <Tabs.TabPane tab="未授权设备/冲突" key="security"><SecurityEvents/></Tabs.TabPane>
         <Tabs.TabPane tab="隔离处置模板" key="isolation"><IsolationTemplates/></Tabs.TabPane>

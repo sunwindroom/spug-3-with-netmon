@@ -1,1 +1,6 @@
 /.idea/
+/.codeartsdoer/
+/.arts/
+*.zip
+*.pyc
+__pycache__/

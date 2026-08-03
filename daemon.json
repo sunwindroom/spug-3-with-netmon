@@ -1,6 +1,0 @@
-{
-  "registry-mirrors": ["https://docker.m.daocloud.io", "https://mirror.ccs.tencentyun.com"],
-  "log-driver": "json-file",
-  "log-opts": {"max-size": "50m", "max-file": "3"},
-  "storage-driver": "overlay2"
-}

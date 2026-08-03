@@ -15,7 +15,10 @@ urlpatterns = [
     path('address/restore/', views.restore_address),
     path('security-events/', views.get_security_events),
     path('scan/start/', views.start_scan),
+<<<<<<< HEAD
     path('scan/test/', views.test_connection),
+=======
+>>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee
     path('scan/import/', views.import_discovery),
     path('insights/', views.get_insights),
     path('change-log/', views.get_change_logs),

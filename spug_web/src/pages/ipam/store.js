@@ -61,13 +61,19 @@ class Store {
 
   @observable scanResults = [];
   @observable scanFindings = [];
+<<<<<<< HEAD
   @observable activeScanSubnetId = null;
   @observable scanSubnetName = '';
+=======
+  @observable scanResultVisible = false;
+  @observable activeScanSubnetId = null;
+>>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee
 
   startScan = (subnetId) => http.post('/api/ipam/scan/start/', { subnet_id: subnetId });
 
   importDiscovery = (subnetId, devices) => http.post('/api/ipam/scan/import/', { subnet_id: subnetId, devices });
 
+<<<<<<< HEAD
   showScanResult = (subnetId, subnetName, results, findings) => {
     this.activeScanSubnetId = subnetId;
     this.scanSubnetName = subnetName;
@@ -81,6 +87,13 @@ class Store {
     this.scanFindings = [];
     this.activeScanSubnetId = null;
     this.scanSubnetName = '';
+=======
+  showScanResult = (subnetId, results, findings) => {
+    this.activeScanSubnetId = subnetId;
+    this.scanResults = results || [];
+    this.scanFindings = findings || [];
+    this.scanResultVisible = true;
+>>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee
   };
 
   fetchInsights = () => {

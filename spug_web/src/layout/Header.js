@@ -5,8 +5,8 @@
  */
 import React from 'react';
 import { Link } from 'react-router-dom';
-import { Layout, Dropdown, Menu, Avatar, Divider } from 'antd';
-import { MenuFoldOutlined, MenuUnfoldOutlined, UserOutlined, LogoutOutlined, CodeOutlined, DownOutlined } from '@ant-design/icons';
+import { Layout, Dropdown, Menu, Avatar } from 'antd';
+import { MenuFoldOutlined, MenuUnfoldOutlined, UserOutlined, LogoutOutlined, CodeOutlined } from '@ant-design/icons';
 import { AuthDiv } from 'components';
 import Notification from './Notification';
 import styles from './layout.module.less';
@@ -59,14 +59,7 @@ export default function (props) {
         {props.collapsed ? <MenuUnfoldOutlined/> : <MenuFoldOutlined/>}
       </div>
       <div className={styles.right}>
-        <div className={styles.link} onClick={() => window.open('https://spug.cc/')}>官网</div>
-        <div className={styles.link} onClick={() => window.open('https://ops.spug.cc/docs/about-spug/')}>文档</div>
-        <Dropdown overlay={ToolsMenu} placement="bottomCenter">
-          <span className={styles.link}>
-            工具服务 <DownOutlined style={{fontSize: 12}}/>
-          </span>
-        </Dropdown>
-        <Divider type="vertical"/>
+
         <Notification/>
         <AuthDiv className={styles.terminal} auth="host.console.view|host.console.list" onClick={openTerminal}>
           <CodeOutlined style={{fontSize: 16}}/>

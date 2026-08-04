@@ -150,17 +150,7 @@ export default function () {
           onClick={handleSubmit}>登录</Button>
       </div>
 
-      <div className={styles.footerZone}>
-        <div className={styles.linksZone}>
-          <a className={styles.links} title="官网" href="https://spug.cc" target="_blank"
-             rel="noopener noreferrer">官网</a>
-          <a className={styles.links} title="Github" href="https://github.com/openspug/spug" target="_blank"
-             rel="noopener noreferrer"><GithubOutlined/></a>
-          <a title="文档" href="https://ops.spug.cc/docs/about-spug/" target="_blank"
-             rel="noopener noreferrer">文档</a>
-        </div>
-        <div style={{color: 'rgba(0, 0, 0, .45)'}}>Copyright <CopyrightOutlined/> {new Date().getFullYear()} By OpenSpug</div>
-      </div>
+
     </div>
   )
 }

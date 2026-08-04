@@ -5,11 +5,7 @@
  */
 import React, { useState } from 'react';
 import { observer } from 'mobx-react';
-<<<<<<< HEAD
-import { Table, Space, Input, InputNumber, Form, Modal, message, Progress, Switch, Tag } from 'antd';
-=======
 import { Table, Space, Input, InputNumber, Form, Modal, message, Progress, Switch, Tag, Checkbox, Tooltip } from 'antd';
->>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee
 import { SearchOutlined, ImportOutlined } from '@ant-design/icons';
 import { AuthButton, LinkButton } from 'components';
 import { http } from 'libs';
@@ -42,11 +38,7 @@ export default observer(function Subnets() {
           message.info('扫描完成，未发现存活主机');
         } else {
           message.success(`扫描完成，发现 ${results.length} 台存活主机`);
-<<<<<<< HEAD
           store.showScanResult(record.id, record.name, results, findings);
-=======
-          store.showScanResult(record.id, results, findings);
->>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee
         }
       })
       .finally(() => setScanning(null))
@@ -85,11 +77,7 @@ export default observer(function Subnets() {
           <AuthButton auth="ipam.subnet.edit" type="link" loading={scanning === r.id} icon={<SearchOutlined/>}
                       onClick={() => handleScan(r)}>扫描</AuthButton>
           <AuthButton auth="ipam.subnet.edit" type="link" icon={<ImportOutlined/>}
-<<<<<<< HEAD
                       onClick={() => handleImport(r)}>导入</AuthButton>
-=======
-                      onClick={() => store.scanResultVisible && store.activeScanSubnetId === r.id ? null : message.info('请先执行扫描')}>导入</AuthButton>
->>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee
           <LinkButton onClick={() => store.showSubnetForm(r)}>编辑</LinkButton>
           <AuthButton auth="ipam.subnet.del" type="link" danger onClick={() => handleDelete(r)}>删除</AuthButton>
         </Space>
@@ -159,8 +147,7 @@ function SubnetForm() {
   )
 }
 
-<<<<<<< HEAD
-=======
+
 function ScanResultModal() {
   const [selectedKeys, setSelectedKeys] = useState([]);
   const [importing, setImporting] = useState(false);
@@ -230,4 +217,3 @@ function ScanResultModal() {
     </Modal>
   )
 }
->>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee

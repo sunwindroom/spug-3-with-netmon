@@ -192,7 +192,6 @@ def start_scan(request):
         scan_results, findings = scanner.scan_subnet(subnet)
     except Exception as e:
         return json_response(error=f'扫描失败: {str(e)}')
-<<<<<<< HEAD
     existing_hosts = {h.hostname for h in Host.objects.all()}
     for item in scan_results:
         item['registered'] = item['address'] in existing_hosts
@@ -246,14 +245,6 @@ def test_connection(request):
 def import_discovery(request):
     from apps.host.models import Group as HostGroup
     from apps.account.models import User
-=======
-    return json_response({'scan_results': scan_results, 'findings': findings})
-
-
-# ------------------------------------------------------------------ 导入发现设备 -----
-@auth('ipam.subnet.edit')
-def import_discovery(request):
->>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee
     form, error = JsonParser(
         Argument('subnet_id', type=int, help='请选择网段'),
         Argument('devices', type=list, help='请选择要导入的设备'),
@@ -263,7 +254,6 @@ def import_discovery(request):
     subnet = Subnet.objects.filter(pk=form.subnet_id).first()
     if not subnet:
         return json_response(error='网段不存在')
-<<<<<<< HEAD
     current_user_id = None
     try:
         current_user_id = request.user.pk
@@ -280,15 +270,11 @@ def import_discovery(request):
         current_user_id = User.objects.filter(is_supper=True).values_list('id', flat=True).first()
     imported = []
     errors = []
-=======
-    imported = []
->>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee
     for item in form.devices:
         address = item.get('address')
         if not address:
             continue
         category = item.get('category_guess', 'other')
-<<<<<<< HEAD
         host_name = item.get('host_name') or address
         host_hostname = item.get('host_hostname') or address
         host_port = item.get('host_port') or 22
@@ -340,57 +326,21 @@ def import_discovery(request):
                 group_id=net_group.id,
                 category=category,
                 created_by_id=current_user_id,
-=======
-        hostname = item.get('hostname') or address
-        host_obj = Host.objects.filter(hostname=hostname).first()
-        if not host_obj:
-            host_obj = Host.objects.create(
-                hostname=hostname,
-                type='linux' if category in ('server', 'database', 'application') else 'switch',
-                desc=f'由IPAM扫描自动导入，网段: {subnet.name}',
-            )
-        group_id = item.get('group_id')
-        if group_id:
-            group = NetGroup.objects.filter(pk=group_id).first()
-        else:
-            group = NetGroup.objects.filter(name='默认分组').first()
-        if not group:
-            group = NetGroup.objects.create(name='默认分组')
-        device_obj = Device.objects.filter(host_id=host_obj.id).first()
-        if not device_obj:
-            device_obj = Device.objects.create(
-                name=hostname,
-                host_id=host_obj.id,
-                group_id=group.id,
-                category=category,
->>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee
             )
         ip_obj = IPAddress.objects.filter(subnet=subnet, address=address).first()
         if ip_obj:
             IPAddress.objects.filter(pk=ip_obj.id).update(
-<<<<<<< HEAD
                 status='allocated', device_id=device_obj.id, hostname=host_name,
-=======
-                status='allocated', device_id=device_obj.id, hostname=hostname,
->>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee
                 mac_address=item.get('mac') or ip_obj.mac_address,
             )
         else:
             IPAddress.objects.create(
                 subnet=subnet, address=address, status='allocated',
-<<<<<<< HEAD
                 device_id=device_obj.id, hostname=host_name,
                 mac_address=item.get('mac'),
             )
         imported.append({'address': address, 'host_name': host_name, 'host_id': host_obj.id, 'device_id': device_obj.id})
     return json_response({'imported': imported, 'count': len(imported), 'errors': errors})
-=======
-                device_id=device_obj.id, hostname=hostname,
-                mac_address=item.get('mac'),
-            )
-        imported.append({'address': address, 'hostname': hostname, 'device_id': device_obj.id})
-    return json_response({'imported': imported, 'count': len(imported)})
->>>>>>> 115dece1e337a145b76b2c9fee198c5e29bd2aee
 
 
 # ------------------------------------------------------------------ 预测性洞察 -----

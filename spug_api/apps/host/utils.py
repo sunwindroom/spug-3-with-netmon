@@ -190,7 +190,10 @@ def fetch_host_extend(ssh):
     if code != 0:
         code, out = ssh.exec_command_raw("grep -c '^processor' /proc/cpuinfo")
     if code == 0:
-        response['cpu'] = int(out.strip())
+        try:
+            response['cpu'] = int(out.strip())
+        except (ValueError, TypeError):
+            pass
 
     code, out = ssh.exec_command_raw("cat /etc/os-release | grep PRETTY_NAME | awk -F \\\" '{print $2}'")
     if '/etc/os-release' in out:
@@ -203,11 +206,14 @@ def fetch_host_extend(ssh):
         for ip in out.strip().split():
             if len(ip) > 15:   # ignore ipv6
                 continue
-            if ipaddress.ip_address(ip).is_global:
-                if len(public_ip_address) < 10:
-                    public_ip_address.add(ip)
-            elif len(private_ip_address) < 10:
-                private_ip_address.add(ip)
+            try:
+                if ipaddress.ip_address(ip).is_global:
+                    if len(public_ip_address) < 10:
+                        public_ip_address.add(ip)
+                elif len(private_ip_address) < 10:
+                    private_ip_address.add(ip)
+            except ValueError:
+                pass
 
     ssh_hostname = ssh.arguments.get('hostname')
     if ip_validator(ssh_hostname):
@@ -225,24 +231,33 @@ def fetch_host_extend(ssh):
         disks = []
         for item in out.strip().splitlines():
             item = item.strip()
-            size = math.ceil(int(item) / 1024 / 1024 / 1024)
-            if size > 10:
-                disks.append(size)
+            try:
+                size = math.ceil(int(item) / 1024 / 1024 / 1024)
+                if size > 10:
+                    disks.append(size)
+            except (ValueError, TypeError):
+                pass
         response['disk'] = disks[:10]
 
     code, out = ssh.exec_command_raw("dmidecode -t 17 | grep -E 'Size: [0-9]+' | awk '{s+=$2} END {print s,$3}'")
     if code == 0:
         fields = out.strip().split()
         if len(fields) == 2 and fields[1] in ('GB', 'MB'):
-            size, unit = out.strip().split()
-            if unit == 'GB':
-                response['memory'] = size
-            else:
-                response['memory'] = round(int(size) / 1024, 0)
+            try:
+                size, unit = out.strip().split()
+                if unit == 'GB':
+                    response['memory'] = size
+                else:
+                    response['memory'] = round(int(size) / 1024, 0)
+            except (ValueError, TypeError):
+                pass
     if 'memory' not in response:
         code, out = ssh.exec_command_raw("cat /proc/meminfo | grep 'MemTotal' | awk '{print $2}'")
         if code == 0:
-            response['memory'] = math.ceil(int(out) / 1024 / 1024)
+            try:
+                response['memory'] = math.ceil(int(out.strip()) / 1024 / 1024)
+            except (ValueError, TypeError):
+                pass
 
     response['public_ip_address'] = list(public_ip_address)
     response['private_ip_address'] = list(private_ip_address)
@@ -271,17 +286,29 @@ def batch_sync_host(token, hosts, password=None):
         rds.expire(token, 60)
 
 
-def _sync_host_extend(host, private_key=None, public_key=None, password=None, ssh=None):
-    if not ssh:
+def _sync_host_extend(host, private_key=None, public_key=None, password=None, ssh=None, extend_data=None):
+    if extend_data:
+        form = AttrDict(extend_data)
+    elif not ssh:
         kwargs = host.to_dict(selects=('hostname', 'port', 'username'))
         with _get_ssh(kwargs, host.pkey, private_key, public_key, password) as ssh:
             return _sync_host_extend(host, ssh=ssh)
-    form = AttrDict(fetch_host_extend(ssh))
+    else:
+        form = AttrDict(fetch_host_extend(ssh))
+    form.setdefault('cpu', 0)
+    form.setdefault('memory', 0)
+    form.setdefault('os_name', 'unknown')
+    form.setdefault('os_type', 'unknown')
+    form.setdefault('disk', [])
+    form.setdefault('public_ip_address', [])
+    form.setdefault('private_ip_address', [])
     form.disk = json.dumps(form.disk)
     form.public_ip_address = json.dumps(form.public_ip_address)
     form.private_ip_address = json.dumps(form.private_ip_address)
     form.updated_at = human_datetime()
-    form.os_type = check_os_type(form.os_name)
+    form.os_type = check_os_type(form.get('os_name', ''))
+    form.setdefault('instance_charge_type', 'Other')
+    form.setdefault('internet_charge_type', 'Other')
     if hasattr(host, 'hostextend'):
         extend = host.hostextend
         extend.update_by_dict(form)

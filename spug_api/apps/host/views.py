@@ -49,6 +49,9 @@ class HostView(View):
                 return json_response('auth fail')
 
             group_ids = form.pop('group_ids')
+            extend_data = getattr(form, '_extend', None)
+            if hasattr(form, '_extend'):
+                del form._extend
             other = Host.objects.filter(name=form.name).first()
             if other and (not form.id or other.id != form.id):
                 return json_response(error=f'已存在的主机名称【{form.name}】')
@@ -58,6 +61,8 @@ class HostView(View):
             else:
                 host = Host.objects.create(created_by=request.user, is_verified=True, **form)
             host.groups.set(group_ids)
+            if extend_data:
+                _sync_host_extend(host, extend_data=extend_data)
             response = host.to_view()
             response['group_ids'] = group_ids
             return json_response(response)
@@ -70,8 +75,11 @@ class HostView(View):
         ).parse(request.body)
         if error is None:
             host = Host.objects.get(pk=form.id)
-            with host.get_ssh() as ssh:
-                _sync_host_extend(host, ssh=ssh)
+            try:
+                with host.get_ssh() as ssh:
+                    _sync_host_extend(host, ssh=ssh)
+            except AuthenticationException:
+                pass
         return json_response(error=error)
 
     @auth('admin')
@@ -193,11 +201,13 @@ def batch_valid(request):
 
 
 def _do_host_verify(form):
+    from apps.host.utils import fetch_host_extend
     password = form.pop('password')
     if form.pkey:
         try:
             with SSH(form.hostname, form.port, form.username, form.pkey) as ssh:
                 ssh.ping()
+                form._extend = fetch_host_extend(ssh)
             return True
         except BadAuthenticationType:
             raise Exception('该主机不支持密钥认证，请参考官方文档，错误代码：E01')
@@ -207,10 +217,13 @@ def _do_host_verify(form):
             raise Exception('连接主机超时，请检查网络')
 
     private_key, public_key = AppSetting.get_ssh_key()
+    password_verified = False
     if password:
         try:
             with SSH(form.hostname, form.port, form.username, password=password) as ssh:
                 ssh.add_public_key(public_key)
+                form._extend = fetch_host_extend(ssh)
+            password_verified = True
         except BadAuthenticationType:
             raise Exception('该主机不支持密码认证，请参考官方文档，错误代码：E00')
         except AuthenticationException:
@@ -221,12 +234,27 @@ def _do_host_verify(form):
     try:
         with SSH(form.hostname, form.port, form.username, private_key) as ssh:
             ssh.ping()
-    except BadAuthenticationType:
-        raise Exception('该主机不支持密钥认证，请参考官方文档，错误代码：E01')
-    except AuthenticationException:
-        if password:
+            if not hasattr(form, '_extend'):
+                form._extend = fetch_host_extend(ssh)
+    except (BadAuthenticationType, AuthenticationException):
+        if password_verified:
+            private_key, public_key = SSH.generate_key()
+            AppSetting.set('private_key', private_key)
+            AppSetting.set('public_key', public_key)
+            AppSetting.get.cache_clear()
+            try:
+                with SSH(form.hostname, form.port, form.username, password=password) as ssh:
+                    ssh.add_public_key(public_key)
+                with SSH(form.hostname, form.port, form.username, private_key) as ssh:
+                    ssh.ping()
+            except Exception:
+                return True
+        elif not password:
+            return False
+        else:
             raise Exception('密钥认证失败，请参考官方文档，错误代码：E02')
-        return False
     except socket.timeout:
+        if password_verified:
+            return True
         raise Exception('连接主机超时，请检查网络')
     return True

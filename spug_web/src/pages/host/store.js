@@ -89,6 +89,7 @@ class Store {
   fetchExtend = (id) => {
     http.put('/api/host/', {id})
       .then(() => this.fetchRecords())
+      .catch(() => {})
   }
 
   fetchGroups = () => {

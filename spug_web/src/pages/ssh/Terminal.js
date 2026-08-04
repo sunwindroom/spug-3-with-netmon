@@ -11,6 +11,15 @@ import 'xterm/css/xterm.css';
 import styles from './index.module.less';
 import gStore from 'gStore';
 
+const _origGetContext = HTMLCanvasElement.prototype.getContext;
+HTMLCanvasElement.prototype.getContext = function(type, attributes) {
+  if (type === '2d') {
+    attributes = attributes || {};
+    attributes.willReadFrequently = true;
+  }
+  return _origGetContext.call(this, type, attributes);
+};
+
 function WebSSH(props) {
   const container = useRef();
   const [term] = useState(new Terminal());

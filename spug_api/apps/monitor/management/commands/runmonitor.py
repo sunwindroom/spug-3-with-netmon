@@ -9,7 +9,7 @@ logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(message)s')
 
 
 class Command(BaseCommand):
-    help = 'Start monitor process'
+    help = 'Start unified scheduler (monitor + netmon)'
 
     def handle(self, *args, **options):
         s = Scheduler()

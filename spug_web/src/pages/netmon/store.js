@@ -19,6 +19,8 @@ class Store {
 
   // 资源台账
   @observable groups = [];
+  @observable treeData = [];
+  @observable hostGroups = {};
   @observable devices = [];
   @observable devFetching = false;
   @observable device = {};
@@ -79,7 +81,18 @@ class Store {
   };
 
   fetchGroups = () => {
-    return http.get('/api/netmon/group/').then(res => this.groups = res)
+    return http.get('/api/host/group/').then(res => {
+      this.treeData = res.treeData || [];
+      this.hostGroups = res.groups || {};
+      this.groups = [];
+      const flatten = (items) => {
+        for (const item of items) {
+          this.groups.push(item);
+          if (item.children) flatten(item.children);
+        }
+      };
+      flatten(this.treeData);
+    })
   };
 
   fetchDevices = (group_id) => {
@@ -90,7 +103,7 @@ class Store {
   };
 
   showForm = (info) => {
-    this.device = info ? { ...info } : { category: 'server', monitor_type: 'ping', rate: 60 };
+    this.device = info ? { ...info } : { category: 'server', monitor_type: 'ping', rate: 60, extra: '' };
     this.formVisible = true;
   };
 

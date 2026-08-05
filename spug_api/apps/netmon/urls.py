@@ -5,7 +5,7 @@ from django.urls import path
 from apps.netmon import views
 
 urlpatterns = [
-    path('group/', views.GroupView.as_view()),
+
     path('device/', views.DeviceView.as_view()),
     path('device/batch-delete/', views.batch_delete_devices),
     path('device/import-csv/', views.import_devices_csv),

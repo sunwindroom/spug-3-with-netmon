@@ -1,13 +1,12 @@
 /**
  * Copyright (c) OpenSpug Organization. https://github.com/openspug/spug
- * Copyright (c) <spug.dev@gmail.com>
  * Released under the AGPL-3.0 License.
  */
 import React from 'react';
 import { observer } from 'mobx-react';
 import { Tabs } from 'antd';
 import { AuthDiv, Breadcrumb } from 'components';
-import Dashboard from './Dashboard';
+import Overview from '../netmon/Overview';
 import ComTable from './Table';
 import ComForm from './Form';
 import MonitorCard from './MonitorCard';
@@ -22,7 +21,7 @@ export default observer(function () {
       </Breadcrumb>
       <Tabs defaultActiveKey="dashboard" type="card">
         <Tabs.TabPane tab="总览大屏" key="dashboard">
-          <Dashboard/>
+          <Overview/>
         </Tabs.TabPane>
         <Tabs.TabPane tab="监控任务" key="tasks">
           <MonitorCard/>

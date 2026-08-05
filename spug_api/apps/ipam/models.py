@@ -4,7 +4,8 @@
 from django.db import models
 from libs import ModelMixin, human_datetime
 from apps.account.models import User
-from apps.netmon.models import NetGroup, Device
+from apps.netmon.models import Device
+from apps.host.models import Group
 from . import ipcalc
 import json
 
@@ -13,7 +14,7 @@ class Subnet(models.Model, ModelMixin):
     """IP 地址池（网段）"""
     name = models.CharField(max_length=100)
     cidr = models.CharField(max_length=50, unique=True, help_text='例如：192.168.10.0/24')
-    group = models.ForeignKey(NetGroup, models.SET_NULL, null=True, blank=True)
+    group = models.ForeignKey(Group, models.SET_NULL, null=True, blank=True)
     vlan_id = models.IntegerField(null=True, blank=True)
     gateway = models.CharField(max_length=50, null=True, blank=True)
     dns_servers = models.CharField(max_length=255, null=True, blank=True)

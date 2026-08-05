@@ -29,6 +29,7 @@ def _match_operator(value, operator, threshold):
 
 
 def check_threshold_rules(device, metric_key, value):
+    from apps.monitor.utils import dispatch_alarm_notify
     events = []
     rules = AlertRule.objects.filter(
         is_active=True, metric_key=metric_key
@@ -42,11 +43,17 @@ def check_threshold_rules(device, metric_key, value):
             rds.expire(counter_key, 3600)
             if count >= rule.consecutive_times:
                 message = f'{device.name}({device.ip}) 指标[{metric_key}] 当前值 {value} {rule.operator} {rule.threshold}，已连续 {count} 次触发规则「{rule.name}」'
-                events.append(AnomalyEvent.objects.create(
+                event = AnomalyEvent.objects.create(
                     device=device, metric_key=metric_key, value=value, baseline=rule.threshold,
                     deviation=round(value - rule.threshold, 2), method='threshold',
                     level=rule.level, message=message
-                ))
+                )
+                events.append(event)
+                try:
+                    target = f'{device.name}({device.ip})'
+                    dispatch_alarm_notify(rule.name, target, message, rule.notify_grp, rule.notify_mode, rule.level)
+                except Exception:
+                    pass
         else:
             rds.delete(counter_key)
     return events

@@ -32,13 +32,14 @@ def netmon_worker_handler(job):
     anomaly.resolve_device_status(device, metrics, events)
 
     for event in events:
-        try:
-            Notify.make_system_notify(
-                f'[{event.get_level_display()}] {device.name} 指标异常',
-                event.message
-            )
-        except Exception as e:
-            logging.warning(f'netmon 异常通知发送失败: {e}')
+        if event.method != 'threshold':
+            try:
+                Notify.make_system_notify(
+                    f'[{event.get_level_display()}] {device.name} 指标异常',
+                    event.message
+                )
+            except Exception as e:
+                logging.warning(f'netmon 异常通知发送失败: {e}')
         try:
             remediation.trigger(device, event)
         except Exception as e:

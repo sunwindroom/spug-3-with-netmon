@@ -4,22 +4,9 @@
 from django.db import models
 from libs import ModelMixin, human_datetime
 from apps.account.models import User
-from apps.host.models import Host
+from apps.host.models import Host, Group
 import json
 
-
-class NetGroup(models.Model, ModelMixin):
-    """业务/机房/拓扑分组，用于资源导航树及报表统计范围"""
-    name = models.CharField(max_length=50)
-    parent_id = models.IntegerField(default=0)
-    sort_id = models.IntegerField(default=0)
-
-    def to_view(self):
-        return dict(key=self.id, value=self.id, title=self.name, parent_id=self.parent_id)
-
-    class Meta:
-        db_table = 'netmon_groups'
-        ordering = ('-sort_id', 'id')
 
 
 class Device(models.Model, ModelMixin):
@@ -41,6 +28,7 @@ class Device(models.Model, ModelMixin):
         ('snmp', 'SNMP采集'),
         ('agent', 'Agent(SSH)采集'),
         ('http', 'HTTP探测'),
+        ('script', '自定义脚本'),
     )
     STATUSES = (
         ('unknown', '未知'),
@@ -53,7 +41,7 @@ class Device(models.Model, ModelMixin):
     name = models.CharField(max_length=100)
     ip = models.CharField(max_length=50, db_index=True)
     category = models.CharField(max_length=20, choices=CATEGORIES, default='server')
-    group = models.ForeignKey(NetGroup, models.SET_NULL, null=True, related_name='devices')
+    group = models.ForeignKey(Group, models.SET_NULL, null=True, blank=True, related_name='netmon_devices')
     vendor = models.CharField(max_length=50, null=True, blank=True)
     model_name = models.CharField(max_length=50, null=True, blank=True)
     location = models.CharField(max_length=100, null=True, blank=True)
@@ -63,6 +51,7 @@ class Device(models.Model, ModelMixin):
     snmp_version = models.CharField(max_length=5, default='2c')
     snmp_community = models.CharField(max_length=50, default='public')
     snmp_port = models.IntegerField(default=161)
+    extra = models.TextField(null=True, blank=True, help_text='自定义脚本内容')
 
     rate = models.IntegerField(default=60, help_text='采集周期(秒)')
     status = models.CharField(max_length=10, choices=STATUSES, default='unknown')
@@ -139,7 +128,7 @@ class AlertRule(models.Model, ModelMixin):
     LEVELS = (('info', '提示'), ('warning', '告警'), ('critical', '严重'))
 
     name = models.CharField(max_length=50)
-    group = models.ForeignKey(NetGroup, models.SET_NULL, null=True, blank=True)
+    group = models.ForeignKey(Group, models.SET_NULL, null=True, blank=True)
     device = models.ForeignKey(Device, models.CASCADE, null=True, blank=True, related_name='alert_rules')
     metric_key = models.CharField(max_length=20)
     operator = models.CharField(max_length=2, choices=OPERATORS)
@@ -201,7 +190,7 @@ class AnomalyEvent(models.Model, ModelMixin):
 class MaintenanceWindow(models.Model, ModelMixin):
     """维护窗口：计划性停机/变更期间抑制误报，避免刷屏告警影响真正故障的排查"""
     name = models.CharField(max_length=100)
-    group = models.ForeignKey(NetGroup, models.SET_NULL, null=True, blank=True)
+    group = models.ForeignKey(Group, models.SET_NULL, null=True, blank=True)
     device = models.ForeignKey(Device, models.CASCADE, null=True, blank=True, related_name='maintenance_windows')
     start_at = models.CharField(max_length=20)
     end_at = models.CharField(max_length=20)
@@ -238,7 +227,7 @@ class RemediationAction(models.Model, ModelMixin):
     """
     name = models.CharField(max_length=100)
     device = models.ForeignKey(Device, models.CASCADE, null=True, blank=True, related_name='remediation_actions')
-    group = models.ForeignKey(NetGroup, models.SET_NULL, null=True, blank=True)
+    group = models.ForeignKey(Group, models.SET_NULL, null=True, blank=True)
     metric_key = models.CharField(max_length=20, null=True, blank=True, help_text='为空表示任意指标异常均可触发')
     level = models.CharField(max_length=10, default='critical', help_text='达到该级别及以上才触发自动处置')
     script = models.TextField(help_text='将通过设备关联主机的SSH凭据执行的shell脚本')
@@ -284,7 +273,7 @@ class Report(models.Model, ModelMixin):
 
     name = models.CharField(max_length=100)
     report_type = models.CharField(max_length=10, choices=REPORT_TYPES, default='daily')
-    group = models.ForeignKey(NetGroup, models.SET_NULL, null=True, blank=True, help_text='为空表示统计全部资源')
+    group = models.ForeignKey(Group, models.SET_NULL, null=True, blank=True, help_text='为空表示统计全部资源')
     recipients = models.CharField(max_length=255, default='[]', help_text='通知联系组id列表(JSON)')
     is_active = models.BooleanField(default=True)
     last_generated_at = models.CharField(max_length=20, null=True)

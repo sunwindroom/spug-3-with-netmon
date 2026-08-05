@@ -11,6 +11,7 @@
   * agent —— 复用 spug 已有主机凭据通过 SSH 采集 CPU/内存/磁盘/网卡，适用于已经纳管的服务器
 """
 from django_redis import get_redis_connection
+from libs.ssh_executor import ssh_exec, ping_check
 from statistics import mean
 import subprocess
 import platform
@@ -122,7 +123,6 @@ def _counter_rate(device, metric_key, counter_octets):
 
 
 def collect_agent(device):
-    """通过已纳管主机的 SSH 凭据采集 CPU/内存/磁盘/网卡（Linux）"""
     if not device.host_id:
         return None
     host = device.host
@@ -132,13 +132,8 @@ def collect_agent(device):
         "echo '#DISK#'; df -h / | tail -1; "
         "echo '#NET#'; cat /proc/net/dev | grep -v 'lo:' | grep ':' | head -1"
     )
-    try:
-        with host.get_ssh() as ssh:
-            exit_code, out = ssh.exec_command_raw(script)
-        if exit_code != 0 or not out:
-            return None
-    except Exception as e:
-        logging.warning(f'Agent采集异常 device={device.ip}: {e}')
+    exit_code, out = ssh_exec(host, script)
+    if exit_code != 0 or not out:
         return None
 
     result = {}
@@ -177,6 +172,33 @@ def collect_agent(device):
     return result or None
 
 
+def collect_script(device):
+    if not device.host_id:
+        return None
+    if not device.extra:
+        return None
+    host = device.host
+    exit_code, out = ssh_exec(host, device.extra)
+    if exit_code != 0 or not out:
+        return None
+    result = {}
+    for line in out.strip().splitlines():
+        line = line.strip()
+        if '=' in line:
+            k, v = line.split('=', 1)
+            try:
+                result[k.strip()] = float(v.strip())
+            except ValueError:
+                pass
+    if not result:
+        try:
+            last_line = out.strip().splitlines()[-1].strip()
+            result['value'] = float(last_line)
+        except (ValueError, IndexError):
+            pass
+    return result or None
+
+
 def collect(device):
     """统一入口：根据设备配置的采集方式分发"""
     if device.monitor_type == 'ping':
@@ -188,6 +210,11 @@ def collect(device):
         return data or None
     if device.monitor_type == 'agent':
         data = collect_agent(device) or {}
+        ping_data = collect_ping(device, samples=2)
+        data.update(ping_data)
+        return data or None
+    if device.monitor_type == 'script':
+        data = collect_script(device) or {}
         ping_data = collect_ping(device, samples=2)
         data.update(ping_data)
         return data or None

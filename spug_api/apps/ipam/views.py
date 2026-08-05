@@ -5,8 +5,8 @@ from django.views.generic import View
 from libs import json_response, JsonParser, Argument, auth
 from apps.ipam.models import Subnet, IPAddress, IPChangeLog, IsolationTemplate
 from apps.ipam import allocator, predictor, scanner, isolation, ipcalc
-from apps.netmon.models import Device, NetGroup
-from apps.host.models import Host
+from apps.netmon.models import Device
+from apps.host.models import Host, Group as HostGroup
 from threading import Thread
 import uuid
 import json
@@ -314,9 +314,9 @@ def import_discovery(request):
             default_grp = HostGroup.objects.first()
             if default_grp:
                 default_grp.hosts.add(host_obj)
-        net_group = NetGroup.objects.filter(name='默认分组').first()
+        net_group = HostGroup.objects.filter(name='默认分组').first()
         if not net_group:
-            net_group = NetGroup.objects.create(name='默认分组')
+            net_group = HostGroup.objects.create(name='默认分组')
         device_obj = Device.objects.filter(host_id=host_obj.id).first()
         if not device_obj:
             device_obj = Device.objects.create(

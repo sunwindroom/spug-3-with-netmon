@@ -5,11 +5,12 @@
  */
 import React, { useEffect, useState } from 'react';
 import { observer } from 'mobx-react';
-import { Table, Tag, Space, Select, Input, Form, Modal, InputNumber, message, Upload, Button, Alert } from 'antd';
+import { Table, Tag, Space, Select, Input, Form, Modal, InputNumber, message, Upload, Button, Alert, TreeSelect } from 'antd';
 import { UploadOutlined, ThunderboltOutlined } from '@ant-design/icons';
-import { AuthButton, LinkButton } from 'components';
-import { http } from 'libs';
+import { AuthButton, LinkButton, ACEditor } from 'components';
+import { http, cleanCommand } from 'libs';
 import store from './store';
+import TemplateSelector from '../exec/task/TemplateSelector';
 
 const STATUS_COLOR = { online: 'green', warning: 'orange', critical: 'red', offline: 'default', unknown: 'default' };
 
@@ -77,9 +78,8 @@ export default observer(function Devices() {
         message="提示：可点击「批量导入」使用 CSV 快速录入大批量设备（表头：name,ip,category,monitor_type,group_id），或前往「自动发现」扫描网段自动识别。"
       />
       <Space style={{ marginBottom: 16 }}>
-        <Select allowClear style={{ width: 220 }} placeholder="按分组筛选" value={groupId} onChange={setGroupId}>
-          {store.groups.map(g => <Select.Option key={g.key} value={g.key}>{g.title}</Select.Option>)}
-        </Select>
+        <TreeSelect allowClear style={{ width: 220 }} placeholder="按分组筛选" value={groupId} onChange={setGroupId}
+          treeData={store.treeData} treeNodeFilterProp="title" showSearch treeDefaultExpandAll/>
         <AuthButton auth="netmon.device.add" type="primary" onClick={() => store.showForm()}>新建设备</AuthButton>
         <Upload accept=".csv" showUploadList={false} beforeUpload={handleImportCsv}>
           <AuthButton auth="netmon.device.add" icon={<UploadOutlined/>} loading={importing}>批量导入(CSV)</AuthButton>
@@ -100,6 +100,7 @@ function DeviceForm({ groupId }) {
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [showTmp, setShowTmp] = useState(false);
   const record = store.device;
 
   function handleSubmit() {
@@ -150,15 +151,20 @@ function DeviceForm({ groupId }) {
           </Select>
         </Form.Item>
         <Form.Item name="group_id" label="所属分组">
-          <Select allowClear>
-            {store.groups.map(g => <Select.Option key={g.key} value={g.key}>{g.title}</Select.Option>)}
-          </Select>
+          <TreeSelect
+            allowClear
+            showSearch
+            treeNodeFilterProp="title"
+            treeData={store.treeData}
+            treeDefaultExpandAll
+            placeholder="请选择分组（与主机管理共享）"/>
         </Form.Item>
         <Form.Item name="monitor_type" label="采集方式" rules={[{ required: true }]}>
           <Select>
             <Select.Option value="ping">Ping探测（时延/丢包）</Select.Option>
             <Select.Option value="snmp">SNMP采集（网络设备CPU/内存/流量）</Select.Option>
             <Select.Option value="agent">Agent采集（复用主机SSH凭据）</Select.Option>
+            <Select.Option value="script">自定义脚本（通过SSH执行自定义脚本）</Select.Option>
           </Select>
         </Form.Item>
         <Form.Item noStyle shouldUpdate={(prev, cur) => prev.monitor_type !== cur.monitor_type}>
@@ -173,6 +179,21 @@ function DeviceForm({ groupId }) {
             </>
           )}
         </Form.Item>
+        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.monitor_type !== cur.monitor_type}>
+          {({ getFieldValue }) => getFieldValue('monitor_type') === 'script' && (
+            <Form.Item
+              required
+              label="脚本内容"
+              extra={<LinkButton onClick={() => setShowTmp(true)}>从模板添加</LinkButton>}>
+              <ACEditor
+                mode="sh"
+                value={record.extra || ''}
+                width="100%"
+                height="200px"
+                onChange={e => { record.extra = cleanCommand(e); form.setFieldsValue({ extra: cleanCommand(e) }) }}/>
+            </Form.Item>
+          )}
+        </Form.Item>
         <Form.Item name="rate" label="采集周期(秒)" initialValue={60} rules={[{ required: true }]}>
           <InputNumber min={10} style={{ width: '100%' }}/>
         </Form.Item>
@@ -181,6 +202,7 @@ function DeviceForm({ groupId }) {
         </Form.Item>
         <Button icon={<ThunderboltOutlined/>} loading={testing} onClick={handleTest}>测试连通性</Button>
       </Form>
+      {showTmp && <TemplateSelector onOk={({body}) => { record.extra = body; form.setFieldsValue({ extra: body }) }} onCancel={() => setShowTmp(false)}/>}
     </Modal>
   )
 }

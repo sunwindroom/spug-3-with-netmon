@@ -11,6 +11,7 @@
 """
 from django_redis import get_redis_connection
 from apps.notify.models import Notify
+from libs.ssh_executor import ssh_exec
 from .models import RemediationAction
 import logging
 
@@ -64,9 +65,5 @@ def trigger(device, event):
 
 
 def _execute(device, script):
-    try:
-        with device.host.get_ssh() as ssh:
-            exit_code, out = ssh.exec_command_raw(script)
-        return exit_code == 0, out or ''
-    except Exception as e:
-        return False, f'执行异常: {e}'
+    exit_code, out = ssh_exec(device.host, script)
+    return exit_code == 0, out or ''

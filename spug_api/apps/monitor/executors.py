@@ -1,12 +1,10 @@
 # Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
-# Copyright: (c) <spug.dev@gmail.com>
 # Released under the AGPL-3.0 License.
 from django_redis import get_redis_connection
 from apps.host.models import Host
 from apps.monitor.utils import handle_notify
+from libs.ssh_executor import ssh_exec_ok, ping_check
 from socket import socket
-import subprocess
-import platform
 import requests
 import logging
 import json
@@ -44,62 +42,33 @@ def port_check(addr, port):
         return False, f'异常信息：{e}'
 
 
-def ping_check(addr):
-    try:
-        if platform.system().lower() == 'windows':
-            command = f'ping -n 1 -w 3000 {addr}'
-        else:
-            command = f'ping -c 1 -W 3 {addr}'
-        task = subprocess.run(command, shell=True, stdout=subprocess.PIPE)
-        if task.returncode == 0:
-            return True, 'Ping检测正常'
-        else:
-            return False, 'Ping检测失败'
-    except Exception as e:
-        return False, f'异常信息：{e}'
+def ping_check_host(addr):
+    return ping_check(addr, timeout=3)
 
 
 def host_executor(host, command):
-    try:
-        with host.get_ssh() as ssh:
-            exit_code, out = ssh.exec_command_raw(command)
-        if exit_code == 0:
-            return True, out or '检测状态正常'
-        else:
-            return False, out or f'退出状态码：{exit_code}'
-    except Exception as e:
-        return False, f'异常信息：{e}'
+    return ssh_exec_ok(host, command)
 
 
 def docker_check(host, container):
-    """检测容器是否处于运行状态：docker inspect 返回 Running=true 判定为正常"""
     command = f"docker inspect -f '{{{{.State.Running}}}}' {container!r} 2>&1"
-    try:
-        with host.get_ssh() as ssh:
-            exit_code, out = ssh.exec_command_raw(command)
-        out = (out or '').strip()
-        if exit_code == 0 and out == 'true':
-            return True, f'容器 {container} 运行中'
-        if 'No such object' in out:
-            return False, f'容器 {container} 不存在'
-        return False, f'容器 {container} 未运行，状态：{out}'
-    except Exception as e:
-        return False, f'异常信息：{e}'
+    exit_code, out = ssh_exec(host, command)
+    out = (out or '').strip()
+    if exit_code == 0 and out == 'true':
+        return True, f'容器 {container} 运行中'
+    if 'No such object' in out:
+        return False, f'容器 {container} 不存在'
+    return False, f'容器 {container} 未运行，状态：{out}'
 
 
 def log_check(host, path, keyword, tail_lines=200):
-    """检测日志文件最近N行中是否出现关键字（如 ERROR/Exception），出现则判定为异常"""
     command = f"tail -n {int(tail_lines)} {path} 2>&1 | grep -c -F {keyword!r}"
-    try:
-        with host.get_ssh() as ssh:
-            exit_code, out = ssh.exec_command_raw(command)
-        out = (out or '0').strip()
-        count = int(out) if out.isdigit() else 0
-        if count > 0:
-            return False, f'日志 {path} 最近{tail_lines}行中发现 {count} 处关键字「{keyword}」'
-        return True, f'日志 {path} 最近{tail_lines}行未发现关键字「{keyword}」'
-    except Exception as e:
-        return False, f'异常信息：{e}'
+    exit_code, out = ssh_exec(host, command)
+    out = (out or '0').strip()
+    count = int(out) if out.isdigit() else 0
+    if count > 0:
+        return False, f'日志 {path} 最近{tail_lines}行中发现 {count} 处关键字「{keyword}」'
+    return True, f'日志 {path} 最近{tail_lines}行未发现关键字「{keyword}」'
 
 
 def monitor_worker_handler(job):
@@ -110,7 +79,7 @@ def monitor_worker_handler(job):
     elif tp in ('2', '7'):
         is_ok, message = port_check(addr, extra)
     elif tp == '5':
-        is_ok, message = ping_check(addr)
+        is_ok, message = ping_check_host(addr)
     elif tp not in ('3', '4', '6', '8'):
         is_ok, message = False, f'invalid monitor type for {tp!r}'
     else:
@@ -151,7 +120,7 @@ def dispatch(tp, addr, extra):
     elif tp in ('2', '7'):
         return port_check(addr, extra)
     elif tp == '5':
-        return ping_check(addr)
+        return ping_check_host(addr)
     elif tp == '3':
         command = f'ps -ef|grep -v grep|grep {extra!r}'
     elif tp == '4':

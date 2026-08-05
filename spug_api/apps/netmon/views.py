@@ -7,9 +7,10 @@ from django.db.models import Count
 from django_redis import get_redis_connection
 from libs import json_response, JsonParser, Argument, human_datetime, auth
 from apps.netmon.models import (
-    NetGroup, Device, Link, MetricRecord, AlertRule, AnomalyEvent, Report, ReportRecord,
+    Device, Link, MetricRecord, AlertRule, AnomalyEvent, Report, ReportRecord,
     MaintenanceWindow, RemediationAction, RemediationLog
 )
+
 from apps.netmon import discovery, reports as report_builder, stats as stats_builder, collectors
 from threading import Thread
 from datetime import datetime, timedelta
@@ -22,34 +23,6 @@ import io
 
 NETMON_KEY = settings.NETMON_KEY
 
-
-# ------------------------------------------------------------------ 分组 -----
-class GroupView(View):
-    @auth('netmon.device.view')
-    def get(self, request):
-        groups = NetGroup.objects.all()
-        return json_response([x.to_view() for x in groups])
-
-    @auth('netmon.device.edit')
-    def post(self, request):
-        form, error = JsonParser(
-            Argument('id', type=int, required=False),
-            Argument('name', help='请输入分组名称'),
-            Argument('parent_id', type=int, default=0),
-        ).parse(request.body)
-        if error is None:
-            if form.id:
-                NetGroup.objects.filter(pk=form.id).update(name=form.name, parent_id=form.parent_id)
-            else:
-                NetGroup.objects.create(**form)
-        return json_response(error=error)
-
-    @auth('netmon.device.del')
-    def delete(self, request):
-        form, error = JsonParser(Argument('id', type=int, help='请指定操作对象')).parse(request.GET)
-        if error is None:
-            NetGroup.objects.filter(pk=form.id).delete()
-        return json_response(error=error)
 
 
 # ------------------------------------------------------------------ 设备台账 -----
@@ -78,6 +51,7 @@ class DeviceView(View):
             Argument('snmp_version', default='2c'),
             Argument('snmp_community', default='public'),
             Argument('snmp_port', type=int, default=161),
+            Argument('extra', required=False),
             Argument('rate', type=int, default=60),
             Argument('desc', required=False),
         ).parse(request.body)
@@ -240,6 +214,11 @@ class TopologyView(View):
 # ------------------------------------------------------------------ 实时总览大屏 -----
 @auth('netmon.device.view')
 def get_overview(request):
+    from apps.monitor.models import Detection
+    from apps.monitor.views import _build_target_status_list, _metric_stats, _distribution
+    from apps.host.models import HostExtend
+    from apps.alarm.models import Alarm
+
     devices = Device.objects.all()
     status_counts = {'online': 0, 'warning': 0, 'critical': 0, 'offline': 0, 'unknown': 0}
     category_counts = {}
@@ -267,6 +246,67 @@ def get_overview(request):
     trend = stats_builder.anomaly_trend(all_devices, days=14)
     top_faulty = stats_builder.top_faulty_devices(all_devices, since_7d, now_str, limit=5)
 
+    # ---- 合并自原 monitor Dashboard 的数据 ----
+    target_list = _build_target_status_list()
+    type_stats = []
+    for code, alias in Detection.TYPES:
+        items = [x for x in target_list if x['type_code'] == code]
+        total = len(items)
+        fault = len([x for x in items if x['status'] == '3'])
+        online = total - fault
+        type_stats.append({
+            'type': code, 'type_alias': alias, 'total': total, 'online': online,
+            'rate': round(online / total * 100, 1) if total else 0.0,
+        })
+
+    since_1h = (datetime.now() - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+    recent_alerts_1h = Alarm.objects.filter(status='1', created_at__gte=since_1h).count()
+
+    dev_list = all_devices
+    bar_charts = {
+        'traffic': [
+            {'metric': '主机上行流量(Kb/s)', **_metric_stats(dev_list, 'net_out')},
+            {'metric': '主机下行流量(Kb/s)', **_metric_stats(dev_list, 'net_in')},
+        ],
+        'load': [
+            {'metric': '主机时延(ms)', **_metric_stats(dev_list, 'rtt')},
+        ],
+        'usage': [
+            {'metric': '主机CPU使用率(%)', **_metric_stats(dev_list, 'cpu')},
+            {'metric': '主机内存使用率(%)', **_metric_stats(dev_list, 'memory')},
+            {'metric': '磁盘使用率(%)', **_metric_stats(dev_list, 'disk')},
+        ],
+    }
+
+    resource_totals = {'cpu_cores': 0, 'memory_gb': 0, 'disk_gb': 0, 'traffic_in_kbps': 0, 'traffic_out_kbps': 0}
+    for ext in HostExtend.objects.all():
+        resource_totals['cpu_cores'] += ext.cpu or 0
+        resource_totals['memory_gb'] += ext.memory or 0
+        try:
+            disks = json.loads(ext.disk) if ext.disk else []
+            resource_totals['disk_gb'] += sum(x.get('size', 0) for x in disks if isinstance(x, dict))
+        except (TypeError, ValueError):
+            pass
+    for d in dev_list:
+        try:
+            v = json.loads(d.last_value) if d.last_value else {}
+        except (TypeError, ValueError):
+            v = {}
+        resource_totals['traffic_in_kbps'] += v.get('net_in', 0)
+        resource_totals['traffic_out_kbps'] += v.get('net_out', 0)
+    resource_totals = {k: round(v, 1) for k, v in resource_totals.items()}
+
+    host_traffic = []
+    for d in dev_list:
+        try:
+            v = json.loads(d.last_value) if d.last_value else {}
+        except (TypeError, ValueError):
+            v = {}
+        total_traffic = (v.get('net_in', 0) or 0) + (v.get('net_out', 0) or 0)
+        if total_traffic > 0:
+            host_traffic.append({'name': d.name, 'ip': d.ip, 'value': round(total_traffic, 1)})
+    host_traffic.sort(key=lambda x: -x['value'])
+
     return json_response({
         'device_total': devices.count(),
         'status_counts': status_counts,
@@ -278,6 +318,14 @@ def get_overview(request):
         'availability_rate': avail,
         'anomaly_trend': trend,
         'top_faulty_7d': top_faulty,
+        'type_stats': type_stats,
+        'recent_alerts_1h': recent_alerts_1h,
+        'resource_total_count': len(dev_list) + Detection.objects.count(),
+        'bar_charts': bar_charts,
+        'memory_distribution': _distribution(dev_list, 'memory'),
+        'cpu_distribution': _distribution(dev_list, 'cpu'),
+        'resource_totals': resource_totals,
+        'host_traffic': host_traffic[:10],
     })
 
 

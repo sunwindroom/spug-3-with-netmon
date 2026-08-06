@@ -29,7 +29,7 @@ def _match_operator(value, operator, threshold):
 
 
 def check_threshold_rules(device, metric_key, value):
-    from apps.monitor.utils import dispatch_alarm_notify
+    from apps.netmon.notify_utils import dispatch_alarm_notify
     events = []
     rules = AlertRule.objects.filter(
         is_active=True, metric_key=metric_key

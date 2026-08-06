@@ -23,13 +23,25 @@ class Device(models.Model, ModelMixin):
         ('application', '业务应用'),
         ('other', '其他'),
     )
-    MONITOR_TYPES = (
-        ('ping', 'Ping探测'),
+    # 指标采集类（写入 MetricRecord，走 AlertRule / 动态基线异常检测）
+    METRIC_TYPES = (
+        ('ping', 'Ping探测(指标采集)'),
         ('snmp', 'SNMP采集'),
         ('agent', 'Agent(SSH)采集'),
-        ('http', 'HTTP探测'),
-        ('script', '自定义脚本'),
+        ('script', '自定义采集脚本(数值)'),
     )
+    # 可用性检测类（原 monitor.Detection 迁移而来，走 threshold/quiet 阈值告警）
+    CHECK_TYPES = (
+        ('http', 'HTTP/站点检测'),
+        ('port', '端口检测'),
+        ('database', '数据库端口检测'),
+        ('ping_check', 'Ping可用性检测(阈值告警)'),
+        ('process', '进程检测'),
+        ('docker', 'Docker容器检测'),
+        ('shell', '命令检测(退出码)'),
+        ('log', '日志关键字监控'),
+    )
+    MONITOR_TYPES = METRIC_TYPES + CHECK_TYPES
     STATUSES = (
         ('unknown', '未知'),
         ('online', '正常'),
@@ -51,17 +63,26 @@ class Device(models.Model, ModelMixin):
     snmp_version = models.CharField(max_length=5, default='2c')
     snmp_community = models.CharField(max_length=50, default='public')
     snmp_port = models.IntegerField(default=161)
-    extra = models.TextField(null=True, blank=True, help_text='自定义脚本内容')
+    extra = models.TextField(null=True, blank=True, help_text='采集脚本内容，或可用性检测的参数(JSON)，含义随monitor_type而定')
 
-    rate = models.IntegerField(default=60, help_text='采集周期(秒)')
+    rate = models.IntegerField(default=60, help_text='采集/检测周期(秒)')
     status = models.CharField(max_length=10, choices=STATUSES, default='unknown')
     last_value = models.TextField(null=True, blank=True, help_text='最近一次采集到的指标快照(JSON)')
     latest_check_at = models.CharField(max_length=20, null=True)
     is_active = models.BooleanField(default=True)
     desc = models.CharField(max_length=255, null=True, blank=True)
 
+    # ---- 可用性检测(CHECK_TYPES)专用告警参数：由原 monitor.Detection 合并而来 ----
+    threshold = models.IntegerField(default=3, help_text='连续失败多少次后判定为故障并发出告警(仅可用性检测类型)')
+    quiet = models.IntegerField(default=24 * 60, help_text='同一故障的告警静默期(分钟)，避免重复刷屏(仅可用性检测类型)')
+    notify_grp = models.CharField(max_length=255, default='[]', help_text='告警联系组id列表(JSON，仅可用性检测类型)')
+    notify_mode = models.CharField(max_length=255, default='[]', help_text='告警方式列表(JSON，仅可用性检测类型)')
+
     created_at = models.CharField(max_length=20, default=human_datetime)
     created_by = models.ForeignKey(User, models.PROTECT, related_name='+')
+
+    def is_check_type(self):
+        return self.monitor_type in dict(self.CHECK_TYPES)
 
     def to_view(self):
         tmp = self.to_dict()
@@ -69,10 +90,19 @@ class Device(models.Model, ModelMixin):
         tmp['monitor_type_alias'] = self.get_monitor_type_display()
         tmp['status_alias'] = self.get_status_display()
         tmp['group_name'] = self.group.name if self.group_id else None
+        tmp['is_check_type'] = self.is_check_type()
         try:
             tmp['last_value'] = json.loads(self.last_value) if self.last_value else {}
         except (TypeError, ValueError):
             tmp['last_value'] = {}
+        try:
+            tmp['notify_grp'] = json.loads(self.notify_grp) if self.notify_grp else []
+        except (TypeError, ValueError):
+            tmp['notify_grp'] = []
+        try:
+            tmp['notify_mode'] = json.loads(self.notify_mode) if self.notify_mode else []
+        except (TypeError, ValueError):
+            tmp['notify_mode'] = []
         return tmp
 
     def __repr__(self):

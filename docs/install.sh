@@ -163,7 +163,7 @@ mysql -e "create database spug default character set utf8mb4 collate utf8mb4_uni
 mysql -e "grant all on spug.* to spug@127.0.0.1 identified by 'spug.dev'"
 mysql -e "flush privileges"
 
-python manage.py initdb
+python manage.py updatedb
 python manage.py useradd -u admin -p spug.dev -s -n 管理员
 
 

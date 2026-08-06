@@ -23,7 +23,6 @@ urlpatterns = [
     path('host/', include('apps.host.urls')),
     path('exec/', include('apps.exec.urls')),
     path('schedule/', include('apps.schedule.urls')),
-    path('monitor/', include('apps.monitor.urls')),
     path('alarm/', include('apps.alarm.urls')),
     path('setting/', include('apps.setting.urls')),
     path('config/', include('apps.config.urls')),

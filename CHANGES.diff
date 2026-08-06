@@ -1,0 +1,3215 @@
+diff --git a/UPGRADE_NOTES.md b/UPGRADE_NOTES.md
+new file mode 100644
+index 0000000..d222f5e
+--- /dev/null
++++ b/UPGRADE_NOTES.md
+@@ -0,0 +1,75 @@
++# 本次改造说明（monitor + netmon 模块统一）
++
++## 一、这次做了什么
++
++你的诉求是"统一所有功能和数据源、删除重复功能、优化前端排版、检查并修复bug"。经过分析，本项目最大的重复功能是并存的两套监控体系：
++
++- **监控中心**（`apps.monitor`，前端菜单 `/monitor`）：站点/端口/进程/自定义脚本/Ping/Docker/数据库/日志共 8 种可用性检测
++- **IT资源监控**（`apps.netmon`，前端菜单 `/netmon`）：设备台账 + Ping/SNMP/Agent/HTTP/脚本 5 种指标采集、异常检测、自动化处置、拓扑发现、报表
++
++两者数据模型不同、告警联系组配置分开、前端菜单分开，`netmon` 的仪表盘代码甚至要反向 `import` `monitor` 的内部实现才能拼出总览页——这是本项目里"数据源不统一"的根源。
++
++本次把两者**合并为一套**，统一在 `apps.netmon.models.Device` 模型上，具体见下方"后端变更"。
++
++## 二、后端变更清单
++
++| 文件 | 变更 |
++|---|---|
++| `apps/netmon/models.py` | `Device.MONITOR_TYPES` 从 5 种扩展到 12 种（新增 http/port/database/ping_check/process/docker/shell/log），新增 `threshold`/`quiet`/`notify_grp`/`notify_mode` 字段承接原监控中心的阈值告警配置 |
++| `apps/netmon/checks.py` **(新增)** | 合并原 `monitor/executors.py` 的 8 种可用性检测逻辑，**修复了两个bug**：①`docker_check`/`log_check` 原来调用了未导入的 `ssh_exec`，一使用就报 `NameError`；②`http`类型早就在选项里但从未实现采集分支，选了没反应 |
++| `apps/netmon/notify_utils.py` **(新增)** | 合并原 `monitor/utils.py` 的告警通知逻辑（写 Alarm 表 + 多渠道推送），是全系统唯一的告警出口 |
++| `apps/netmon/executors.py` | 重写为"指标采集"和"可用性检测"两条流程统一分发 |
++| `apps/netmon/scheduler.py` **(新增，原 `apps/monitor/scheduler.py` 迁移合并)** | 统一调度器，只调度 `Device` 表，不再有两套定时任务 |
++| `apps/netmon/management/commands/runmonitor.py` | 迁移自 `apps/monitor`，**命令名不变**，你现有的 `tools/start-monitor.sh` 不用改 |
++| `apps/netmon/management/commands/migrate_legacy_monitor.py` **(新增)** | 一次性数据迁移命令，见下方"三、部署步骤" |
++| `apps/netmon/views.py` | 设备表单支持新字段；`get_overview` 仪表盘改为直接从 `Device` 统计，不再反向依赖 monitor |
++| `apps/alarm/views.py`、`apps/exec/views.py`、`apps/home/views.py`、`apps/host/views.py` | 清理对 `apps.monitor` 的引用/权限字符串，改指向统一后的 `netmon.device.*` |
++| `apps/monitor/` | **整个目录已删除** |
++| `spug/settings.py`、`spug/urls.py` | 移除 `apps.monitor` 的注册和路由 |
++| `docs/install.sh` | **修复一个真实 bug**：官方安装脚本写的是 `python manage.py initdb`，但代码里这个命令根本不存在（只有 `updatedb`），照着装第一步就会失败，已改为 `updatedb` |
++
++## 三、部署步骤（内网服务器）
++
++1. 备份好现有数据库（`mysqldump`），这是任何库表结构变更前的标准动作。
++2. 用本次的代码整体替换 `spug_api`、`spug_web`、`docs` 目录。
++3. 后端：
++   ```bash
++   cd spug_api
++   source venv/bin/activate
++   pip install -r requirements.txt
++   python manage.py updatedb          # 自动生成并应用本次新增字段的迁移（这是项目原有约定：迁移文件不入库，每次部署自动生成）
++   python manage.py migrate_legacy_monitor --dry-run   # 先预览：会把旧"监控中心"的监控项迁移成新的记录
++   python manage.py migrate_legacy_monitor             # 确认无误后正式迁移
++   ```
++   `migrate_legacy_monitor` 是幂等的、只读旧表写新表，**不会删除或修改原 `detections` 表**，迁移完成、确认新版监控中心工作正常后，你可以自行归档/清理旧表。
++4. 前端：
++   ```bash
++   cd spug_web
++   npm install    # 或 yarn
++   npm run build
++   ```
++5. 重启服务（`start-api.sh`、`start-worker.sh`、`start-monitor.sh`、`start-ws.sh`，命令名都没变）。
++6. 登录后到"监控中心"页面核对迁移过来的监控项（类型、阈值、告警组是否正确），并用页面上的"测试连通性/可用性"按钮抽查几个。
++
++## 四、前端变更清单
++
++- 删除重复的"监控中心"菜单和 `pages/monitor` 整个目录，`pages/netmon` 现在是唯一入口，菜单标题统一为"监控中心"
++- 整体菜单重新编排：总览类（工作台/仪表盘）→ 资源与可观测性类（主机管理/IP地址管理/监控中心/报警中心）→ 发布运维类（批量执行/应用发布/任务计划/配置中心）→ 系统管理固定放最后
++- "监控中心"的新建/编辑表单补齐了合并进来的 8 种检测类型的录入界面（URL、端口、进程关键字、Docker容器名、日志路径关键字、绑定主机）以及告警阈值/静默期/告警联系组/通知渠道
++- 修复了一个会导致仪表盘报错的**遗留bug**：`pages/dashboard/AlarmTrend.js` 原来调用 `/api/monitor/` 接口获取报警趋势的筛选选项，这个接口随 `monitor` 模块删除后会 404，已改为从统一后的 `/api/netmon/device/` 取数据，并修正了筛选参数与后端 `Alarm.type` 字段实际存储值的匹配问题（原代码这里的筛选逻辑其实也是对不上的）
++- 设备详情抽屉：对可用性检测类型的监控项不再展示 5 个空的指标趋势图（之前会显示一堆"暂无采集数据"），改为直接展示最近一次检测结果文本
++
++## 五、验证情况说明
++
++我在沙箱环境里用 Python 虚拟环境装了实际依赖，做了以下验证：
++- `manage.py check` 全量通过（0 issues）
++- 全部 14 个 app 的 `makemigrations` + `migrate` 在全新 SQLite 库上完整建表成功
++- 所有新增/改动的 Python 模块逐一 import 测试通过
++- 用模拟的旧 `detections` 表数据，完整跑通 `migrate_legacy_monitor` 命令，覆盖 HTTP/端口/进程/日志 4 类典型场景，迁移后字段核对无误
++- 对迁移出来的记录跑了一遍 `checks.run_check()`，确认异常情况（网络不通、SSH无密钥等）都被优雅处理、不会抛出未捕获异常
++- 前端改动文件用 Babel 做了独立语法检查，全部通过
++
++**没有覆盖到的部分**（沙箱环境限制，需要你在真实环境验证）：
++- 没有真实 MySQL/Redis，无法验证在你生产库结构上跑 `updatedb` 的实际效果，建议先在测试库跑一遍
++- 没有安装完整前端 `node_modules` 做真实 `npm run build`（只做了 Babel 语法检查），建议部署前本地先 `npm run build` 一遍确认无报错
++- 真实的 SNMP/SSH/短信/微信等外部对接没有条件在沙箱里连通测试，建议迁移后对每种类型至少抽查一条真实数据
+diff --git a/docs/install.sh b/docs/install.sh
+index 76fb984..96589ab 100644
+--- a/docs/install.sh
++++ b/docs/install.sh
+@@ -163,7 +163,7 @@ mysql -e "create database spug default character set utf8mb4 collate utf8mb4_uni
+ mysql -e "grant all on spug.* to spug@127.0.0.1 identified by 'spug.dev'"
+ mysql -e "flush privileges"
+ 
+-python manage.py initdb
++python manage.py updatedb
+ python manage.py useradd -u admin -p spug.dev -s -n 管理员
+ 
+ 
+diff --git a/spug_api/apps/alarm/views.py b/spug_api/apps/alarm/views.py
+index 9d0c42f..7c98042 100644
+--- a/spug_api/apps/alarm/views.py
++++ b/spug_api/apps/alarm/views.py
+@@ -6,7 +6,6 @@ from libs import json_response, JsonParser, Argument, auth
+ from libs.spug import Notification
+ from libs.push import get_contacts
+ from apps.alarm.models import Alarm, Group, Contact
+-from apps.monitor.models import Detection
+ from apps.setting.utils import AppSetting
+ import json
+ 
+@@ -19,7 +18,7 @@ class AlarmView(View):
+ 
+ 
+ class GroupView(View):
+-    @auth('alarm.group.view|monitor.monitor.add|monitor.monitor.edit|alarm.alarm.view')
++    @auth('alarm.group.view|netmon.device.add|netmon.device.edit|alarm.alarm.view')
+     def get(self, request):
+         groups = Group.objects.all()
+         return json_response(groups)
+diff --git a/spug_api/apps/exec/management/commands/runworker.py b/spug_api/apps/exec/management/commands/runworker.py
+index 5e8ecdd..63f2c40 100644
+--- a/spug_api/apps/exec/management/commands/runworker.py
++++ b/spug_api/apps/exec/management/commands/runworker.py
+@@ -7,7 +7,6 @@ from django.db import connections
+ from django_redis import get_redis_connection
+ from concurrent.futures import ThreadPoolExecutor
+ from apps.schedule.executors import schedule_worker_handler
+-from apps.monitor.executors import monitor_worker_handler
+ from apps.exec.executors import exec_worker_handler
+ from apps.netmon.executors import netmon_worker_handler
+ from apps.notify.models import Notify
+@@ -17,7 +16,6 @@ import time
+ import os
+ 
+ EXEC_WORKER_KEY = settings.EXEC_WORKER_KEY
+-MONITOR_WORKER_KEY = settings.MONITOR_WORKER_KEY
+ SCHEDULE_WORKER_KEY = settings.SCHEDULE_WORKER_KEY
+ NETMON_WORKER_KEY = settings.NETMON_WORKER_KEY
+ 
+@@ -54,14 +52,12 @@ class Worker:
+     def run(self):
+         logging.warning('Running worker')
+         Thread(target=self.queue_monitor, daemon=True).start()
+-        self.rds.delete(EXEC_WORKER_KEY, MONITOR_WORKER_KEY, SCHEDULE_WORKER_KEY, NETMON_WORKER_KEY)
++        self.rds.delete(EXEC_WORKER_KEY, SCHEDULE_WORKER_KEY, NETMON_WORKER_KEY)
+         while True:
+-            key, job = self.rds.blpop([EXEC_WORKER_KEY, SCHEDULE_WORKER_KEY, MONITOR_WORKER_KEY, NETMON_WORKER_KEY])
++            key, job = self.rds.blpop([EXEC_WORKER_KEY, SCHEDULE_WORKER_KEY, NETMON_WORKER_KEY])
+             key = key.decode()
+             if key == SCHEDULE_WORKER_KEY:
+                 future = self._executor.submit(schedule_worker_handler, job)
+-            elif key == MONITOR_WORKER_KEY:
+-                future = self._executor.submit(monitor_worker_handler, job)
+             elif key == EXEC_WORKER_KEY:
+                 future = self._executor.submit(exec_worker_handler, job)
+             elif key == NETMON_WORKER_KEY:
+diff --git a/spug_api/apps/exec/views.py b/spug_api/apps/exec/views.py
+index a6db18c..dec6b38 100644
+--- a/spug_api/apps/exec/views.py
++++ b/spug_api/apps/exec/views.py
+@@ -14,7 +14,7 @@ import json
+ 
+ class TemplateView(View):
+     @auth('exec.template.view|exec.task.do|schedule.schedule.add|schedule.schedule.edit|\
+-    monitor.monitor.add|monitor.monitor.edit')
++    netmon.device.add|netmon.device.edit')
+     def get(self, request):
+         templates = ExecTemplate.objects.all()
+         types = [x['type'] for x in templates.order_by('type').values('type').distinct()]
+diff --git a/spug_api/apps/home/views.py b/spug_api/apps/home/views.py
+index 22938d9..c145353 100644
+--- a/spug_api/apps/home/views.py
++++ b/spug_api/apps/home/views.py
+@@ -4,7 +4,7 @@
+ from apps.app.models import App
+ from apps.host.models import Host
+ from apps.schedule.models import Task
+-from apps.monitor.models import Detection
++from apps.netmon.models import Device
+ from apps.alarm.models import Alarm
+ from apps.deploy.models import Deploy, DeployRequest
+ from apps.account.utils import get_host_perms
+@@ -28,7 +28,7 @@ def get_statistic(request):
+         'app': app,
+         'host': host,
+         'task': Task.objects.count(),
+-        'detection': Detection.objects.count()
++        'detection': Device.objects.count()
+     }
+     return json_response(data)
+ 
+diff --git a/spug_api/apps/host/views.py b/spug_api/apps/host/views.py
+index 120d408..16bc793 100644
+--- a/spug_api/apps/host/views.py
++++ b/spug_api/apps/host/views.py
+@@ -12,7 +12,7 @@ from apps.host.utils import batch_sync_host, _sync_host_extend
+ from apps.exec.models import ExecTemplate
+ from apps.app.models import Deploy
+ from apps.schedule.models import Task
+-from apps.monitor.models import Detection
++from apps.netmon.models import Device
+ from libs.ssh import SSH, AuthenticationException
+ from paramiko.ssh_exception import BadAuthenticationType
+ from openpyxl import load_workbook
+@@ -123,9 +123,9 @@ class HostView(View):
+                 task = Task.objects.filter(targets__regex=regex).first()
+                 if task:
+                     return json_response(error=f'任务计划中的任务【{task.name}】关联了该主机，请解除关联后再尝试删除该主机')
+-                detection = Detection.objects.filter(type__in=('3', '4'), targets__regex=regex).first()
+-                if detection:
+-                    return json_response(error=f'监控中心的任务【{detection.name}】关联了该主机，请解除关联后再尝试删除该主机')
++                device = Device.objects.filter(host_id=host_id).first()
++                if device:
++                    return json_response(error=f'IT资源监控中的设备【{device.name}】关联了该主机，请解除关联后再尝试删除该主机')
+                 tpl = ExecTemplate.objects.filter(host_ids__regex=regex).first()
+                 if tpl:
+                     return json_response(error=f'执行模板【{tpl.name}】关联了该主机，请解除关联后再尝试删除该主机')
+diff --git a/spug_api/apps/monitor/__init__.py b/spug_api/apps/monitor/__init__.py
+deleted file mode 100644
+index 89f622a..0000000
+--- a/spug_api/apps/monitor/__init__.py
++++ /dev/null
+@@ -1,3 +0,0 @@
+-# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
+-# Copyright: (c) <spug.dev@gmail.com>
+-# Released under the AGPL-3.0 License.
+diff --git a/spug_api/apps/monitor/executors.py b/spug_api/apps/monitor/executors.py
+deleted file mode 100644
+index c2fa320..0000000
+--- a/spug_api/apps/monitor/executors.py
++++ /dev/null
+@@ -1,142 +0,0 @@
+-# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
+-# Released under the AGPL-3.0 License.
+-from django_redis import get_redis_connection
+-from apps.host.models import Host
+-from apps.monitor.utils import handle_notify
+-from libs.ssh_executor import ssh_exec_ok, ping_check
+-from socket import socket
+-import requests
+-import logging
+-import json
+-import time
+-import re
+-
+-logging.captureWarnings(True)
+-regex = re.compile(r'Failed to establish a new connection: (.*)\'\)+')
+-
+-
+-def site_check(url, limit):
+-    try:
+-        res = requests.get(url, timeout=30)
+-        if limit:
+-            duration = int(res.elapsed.total_seconds() * 1000)
+-            if duration > int(limit):
+-                return False, f'响应时间 {duration}ms 大于 {limit}ms'
+-        return 200 <= res.status_code < 400, f'返回HTTP状态码 {res.status_code}'
+-    except Exception as e:
+-        error = e.__str__()
+-        exps = re.findall(regex, error)
+-        if exps:
+-            error = exps[0]
+-        return False, error
+-
+-
+-def port_check(addr, port):
+-    try:
+-        sock = socket()
+-        sock.settimeout(5)
+-        sock.connect((addr, int(port)))
+-        sock.close()
+-        return True, '端口状态检测正常'
+-    except Exception as e:
+-        return False, f'异常信息：{e}'
+-
+-
+-def ping_check_host(addr):
+-    return ping_check(addr, timeout=3)
+-
+-
+-def host_executor(host, command):
+-    return ssh_exec_ok(host, command)
+-
+-
+-def docker_check(host, container):
+-    command = f"docker inspect -f '{{{{.State.Running}}}}' {container!r} 2>&1"
+-    exit_code, out = ssh_exec(host, command)
+-    out = (out or '').strip()
+-    if exit_code == 0 and out == 'true':
+-        return True, f'容器 {container} 运行中'
+-    if 'No such object' in out:
+-        return False, f'容器 {container} 不存在'
+-    return False, f'容器 {container} 未运行，状态：{out}'
+-
+-
+-def log_check(host, path, keyword, tail_lines=200):
+-    command = f"tail -n {int(tail_lines)} {path} 2>&1 | grep -c -F {keyword!r}"
+-    exit_code, out = ssh_exec(host, command)
+-    out = (out or '0').strip()
+-    count = int(out) if out.isdigit() else 0
+-    if count > 0:
+-        return False, f'日志 {path} 最近{tail_lines}行中发现 {count} 处关键字「{keyword}」'
+-    return True, f'日志 {path} 最近{tail_lines}行未发现关键字「{keyword}」'
+-
+-
+-def monitor_worker_handler(job):
+-    task_id, tp, addr, extra, threshold, quiet = json.loads(job)
+-    target = addr
+-    if tp == '1':
+-        is_ok, message = site_check(addr, extra)
+-    elif tp in ('2', '7'):
+-        is_ok, message = port_check(addr, extra)
+-    elif tp == '5':
+-        is_ok, message = ping_check_host(addr)
+-    elif tp not in ('3', '4', '6', '8'):
+-        is_ok, message = False, f'invalid monitor type for {tp!r}'
+-    else:
+-        host = Host.objects.filter(pk=addr).first()
+-        if not host:
+-            is_ok, message = False, f'unknown host id for {addr!r}'
+-        elif tp == '3':
+-            is_ok, message = host_executor(host, f'ps -ef|grep -v grep|grep {extra!r}')
+-        elif tp == '4':
+-            is_ok, message = host_executor(host, extra)
+-        elif tp == '6':
+-            is_ok, message = docker_check(host, extra)
+-        else:  # tp == '8'
+-            path, _, keyword = (extra or '').partition('||')
+-            is_ok, message = log_check(host, path, keyword)
+-        target = f'{host.name}({host.hostname})' if host else addr
+-
+-    rds, key, f_count, f_time = get_redis_connection(), f'spug:det:{task_id}', f'c_{addr}', f't_{addr}'
+-    v_count, v_time = rds.hmget(key, f_count, f_time)
+-    if is_ok:
+-        if v_count:
+-            rds.hdel(key, f_count, f_time)
+-        if v_time:
+-            logging.warning('send recovery notification')
+-            handle_notify(task_id, target, is_ok, message, int(v_count) + 1)
+-        return
+-    v_count = rds.hincrby(key, f_count)
+-    if v_count >= threshold:
+-        if not v_time or int(time.time()) - int(v_time) >= quiet * 60:
+-            rds.hset(key, f_time, int(time.time()))
+-            logging.warning('send fault alarm notification')
+-            handle_notify(task_id, target, is_ok, message, v_count)
+-
+-
+-def dispatch(tp, addr, extra):
+-    if tp == '1':
+-        return site_check(addr, extra)
+-    elif tp in ('2', '7'):
+-        return port_check(addr, extra)
+-    elif tp == '5':
+-        return ping_check_host(addr)
+-    elif tp == '3':
+-        command = f'ps -ef|grep -v grep|grep {extra!r}'
+-    elif tp == '4':
+-        command = extra
+-    elif tp == '6':
+-        host = Host.objects.filter(pk=addr).first()
+-        if not host:
+-            return False, f'unknown host id for {addr!r}'
+-        return docker_check(host, extra)
+-    elif tp == '8':
+-        host = Host.objects.filter(pk=addr).first()
+-        if not host:
+-            return False, f'unknown host id for {addr!r}'
+-        path, _, keyword = (extra or '').partition('||')
+-        return log_check(host, path, keyword)
+-    else:
+-        raise TypeError(f'invalid monitor type: {tp!r}')
+-    host = Host.objects.filter(pk=addr).first()
+-    return host_executor(host, command)
+diff --git a/spug_api/apps/monitor/models.py b/spug_api/apps/monitor/models.py
+deleted file mode 100644
+index 3f87b4b..0000000
+--- a/spug_api/apps/monitor/models.py
++++ /dev/null
+@@ -1,58 +0,0 @@
+-# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
+-# Copyright: (c) <spug.dev@gmail.com>
+-# Released under the AGPL-3.0 License.
+-from django.db import models
+-from libs import ModelMixin, human_datetime
+-from apps.account.models import User
+-import json
+-
+-
+-class Detection(models.Model, ModelMixin):
+-    TYPES = (
+-        ('1', '站点检测'),
+-        ('2', '端口检测'),
+-        ('3', '进程检测'),
+-        ('4', '自定义脚本'),
+-        ('5', 'Ping检测'),
+-        ('6', 'Docker检测'),
+-        ('7', '数据库检测'),
+-        ('8', '日志监控'),
+-    )
+-    STATUS = (
+-        (0, '正常'),
+-        (1, '异常'),
+-    )
+-    name = models.CharField(max_length=50)
+-    type = models.CharField(max_length=2, choices=TYPES)
+-    group = models.CharField(max_length=255, null=True)
+-    targets = models.TextField()
+-    extra = models.TextField(null=True)
+-    desc = models.CharField(max_length=255, null=True)
+-    is_active = models.BooleanField(default=True)
+-    rate = models.IntegerField(default=5)
+-    threshold = models.IntegerField(default=3)
+-    quiet = models.IntegerField(default=24 * 60)
+-    fault_times = models.SmallIntegerField(default=0)
+-    notify_mode = models.CharField(max_length=255)
+-    notify_grp = models.CharField(max_length=255)
+-    latest_run_time = models.CharField(max_length=20, null=True)
+-
+-    created_at = models.CharField(max_length=20, default=human_datetime)
+-    created_by = models.ForeignKey(User, models.PROTECT, related_name='+')
+-    updated_at = models.CharField(max_length=20, null=True)
+-    updated_by = models.ForeignKey(User, models.PROTECT, related_name='+', null=True)
+-
+-    def to_view(self):
+-        tmp = self.to_dict()
+-        tmp['type_alias'] = self.get_type_display()
+-        tmp['notify_mode'] = json.loads(self.notify_mode)
+-        tmp['notify_grp'] = json.loads(self.notify_grp)
+-        tmp['targets'] = json.loads(self.targets)
+-        return tmp
+-
+-    def __repr__(self):
+-        return '<Detection %r>' % self.name
+-
+-    class Meta:
+-        db_table = 'detections'
+-        ordering = ('-id',)
+diff --git a/spug_api/apps/monitor/scheduler.py b/spug_api/apps/monitor/scheduler.py
+deleted file mode 100644
+index 259a1c9..0000000
+--- a/spug_api/apps/monitor/scheduler.py
++++ /dev/null
+@@ -1,116 +0,0 @@
+-# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
+-# Released under the AGPL-3.0 License.
+-from apscheduler.schedulers.background import BackgroundScheduler
+-from apscheduler.executors.pool import ThreadPoolExecutor
+-from apscheduler.triggers.interval import IntervalTrigger
+-from django_redis import get_redis_connection
+-from django.conf import settings
+-from django.db import connections
+-from django.db.utils import DatabaseError
+-from apps.monitor.models import Detection
+-from apps.netmon.models import Device
+-from apps.netmon.anomaly import check_escalations
+-from libs import AttrDict, human_datetime
+-from datetime import datetime, timedelta
+-from random import randint
+-import logging
+-import json
+-
+-MONITOR_WORKER_KEY = settings.MONITOR_WORKER_KEY
+-NETMON_WORKER_KEY = settings.NETMON_WORKER_KEY
+-
+-
+-class Scheduler:
+-    """统一调度器：同时管理 monitor(Detection) 和 netmon(Device) 的定时采集任务。
+-    两类任务分别通过各自的 Redis 队列分发到 runworker 线程池异步执行。
+-    """
+-    timezone = settings.TIME_ZONE
+-
+-    def __init__(self):
+-        self.scheduler = BackgroundScheduler(timezone=self.timezone, executors={'default': ThreadPoolExecutor(30)})
+-
+-    def _dispatch_monitor(self, task_id, tp, targets, extra, threshold, quiet):
+-        Detection.objects.filter(pk=task_id).update(latest_run_time=human_datetime())
+-        rds_cli = get_redis_connection()
+-        for t in json.loads(targets):
+-            rds_cli.rpush(MONITOR_WORKER_KEY, json.dumps([task_id, tp, t, extra, threshold, quiet]))
+-        connections.close_all()
+-
+-    def _dispatch_netmon(self, device_id):
+-        rds_cli = get_redis_connection()
+-        rds_cli.rpush(NETMON_WORKER_KEY, json.dumps({'device_id': device_id}))
+-        connections.close_all()
+-
+-    def _safe_check_escalations(self):
+-        try:
+-            check_escalations()
+-        except DatabaseError:
+-            pass
+-        finally:
+-            connections.close_all()
+-
+-    def _init(self):
+-        self.scheduler.start()
+-        self.scheduler.add_job(
+-            self._safe_check_escalations, IntervalTrigger(seconds=60, timezone=self.timezone), id='netmon_escalation'
+-        )
+-        try:
+-            for item in Detection.objects.filter(is_active=True):
+-                now = datetime.now()
+-                trigger = IntervalTrigger(minutes=int(item.rate), timezone=self.timezone)
+-                self.scheduler.add_job(
+-                    self._dispatch_monitor,
+-                    trigger,
+-                    id=str(item.id),
+-                    args=(item.id, item.type, item.targets, item.extra, item.threshold, item.quiet),
+-                    next_run_time=now + timedelta(seconds=randint(0, 60))
+-                )
+-            connections.close_all()
+-        except DatabaseError:
+-            pass
+-        try:
+-            for item in Device.objects.filter(is_active=True):
+-                trigger = IntervalTrigger(seconds=int(item.rate), timezone=self.timezone)
+-                self.scheduler.add_job(
+-                    self._dispatch_netmon, trigger, id=f'netmon_{item.id}', args=(item.id,),
+-                    next_run_time=datetime.now() + timedelta(seconds=randint(0, 30))
+-                )
+-            connections.close_all()
+-        except DatabaseError:
+-            pass
+-
+-    def run(self):
+-        rds_cli = get_redis_connection()
+-        self._init()
+-        rds_cli.delete(settings.MONITOR_KEY, settings.NETMON_KEY)
+-        logging.warning('Running unified scheduler (monitor + netmon)')
+-        while True:
+-            _, data = rds_cli.brpop([settings.MONITOR_KEY, settings.NETMON_KEY])
+-            raw = json.loads(data)
+-            key_used = _.decode() if isinstance(_, bytes) else _
+-            task = AttrDict(raw)
+-            if key_used == settings.NETMON_KEY:
+-                job_id = f'netmon_{task.id}'
+-                if task.action in ('add', 'modify'):
+-                    trigger = IntervalTrigger(seconds=int(task.rate), timezone=self.timezone)
+-                    self.scheduler.add_job(
+-                        self._dispatch_netmon, trigger, id=job_id, args=(task.id,), replace_existing=True
+-                    )
+-                elif task.action == 'remove':
+-                    job = self.scheduler.get_job(job_id)
+-                    if job:
+-                        job.remove()
+-            else:
+-                if task.action in ('add', 'modify'):
+-                    trigger = IntervalTrigger(minutes=int(task.rate), timezone=self.timezone)
+-                    self.scheduler.add_job(
+-                        self._dispatch_monitor,
+-                        trigger,
+-                        id=str(task.id),
+-                        args=(task.id, task.type, task.targets, task.extra, task.threshold, task.quiet),
+-                        replace_existing=True
+-                    )
+-                elif task.action == 'remove':
+-                    job = self.scheduler.get_job(str(task.id))
+-                    if job:
+-                        job.remove()
+diff --git a/spug_api/apps/monitor/urls.py b/spug_api/apps/monitor/urls.py
+deleted file mode 100644
+index 563bb37..0000000
+--- a/spug_api/apps/monitor/urls.py
++++ /dev/null
+@@ -1,13 +0,0 @@
+-# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
+-# Copyright: (c) <spug.dev@gmail.com>
+-# Released under the AGPL-3.0 License.
+-from django.urls import path
+-
+-from .views import *
+-
+-urlpatterns = [
+-    path('', DetectionView.as_view()),
+-    path('overview/', get_overview),
+-    path('dashboard/', get_dashboard),
+-    path('test/', run_test),
+-]
+diff --git a/spug_api/apps/monitor/utils.py b/spug_api/apps/monitor/utils.py
+deleted file mode 100644
+index 1383af4..0000000
+--- a/spug_api/apps/monitor/utils.py
++++ /dev/null
+@@ -1,63 +0,0 @@
+-# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
+-# Released under the AGPL-3.0 License.
+-from django.db import close_old_connections
+-from apps.alarm.models import Alarm
+-from apps.monitor.models import Detection
+-from libs.spug import Notification
+-import json
+-
+-
+-def seconds_to_human(seconds):
+-    text = ''
+-    if seconds > 3600:
+-        text = f'{int(seconds / 3600)}小时'
+-        seconds = seconds % 3600
+-    if seconds > 60:
+-        text += f'{int(seconds / 60)}分钟'
+-        seconds = seconds % 60
+-    if seconds:
+-        text += f'{seconds}秒'
+-    return text
+-
+-
+-def _record_alarm(det, target, duration, status):
+-    Alarm.objects.create(
+-        name=det.name,
+-        type=det.get_type_display(),
+-        target=target,
+-        status=status,
+-        duration=duration,
+-        notify_grp=det.notify_grp,
+-        notify_mode=det.notify_mode)
+-
+-
+-def handle_notify(task_id, target, is_ok, out, fault_times):
+-    close_old_connections()
+-    det = Detection.objects.get(pk=task_id)
+-    duration = seconds_to_human(det.rate * fault_times * 60)
+-    event = '2' if is_ok else '1'
+-    _record_alarm(det, target, duration, event)
+-    grp = json.loads(det.notify_grp)
+-    notify = Notification(grp, event, target, det.name, out, duration)
+-    notify.dispatch_monitor(json.loads(det.notify_mode))
+-
+-
+-def dispatch_alarm_notify(name, target, message, notify_grp, notify_mode, level='warning'):
+-    """通用告警通知入口，供 netmon 等模块调用，统一走 alarm 联系组 + 多渠道通知。
+-    同时写入 Alarm 表，使监控中心的告警历史也能看到 netmon 产生的告警。
+-    """
+-    close_old_connections()
+-    grp = json.loads(notify_grp) if isinstance(notify_grp, str) else notify_grp
+-    modes = json.loads(notify_mode) if isinstance(notify_mode, str) else notify_mode
+-    event = '1'
+-    Alarm.objects.create(
+-        name=name,
+-        type='netmon',
+-        target=target,
+-        status=event,
+-        duration='-',
+-        notify_grp=json.dumps(grp),
+-        notify_mode=json.dumps(modes))
+-    if grp and modes:
+-        notify = Notification(grp, event, target, name, message, '-')
+-        notify.dispatch_monitor(modes)
+diff --git a/spug_api/apps/monitor/views.py b/spug_api/apps/monitor/views.py
+deleted file mode 100644
+index 33d59fc..0000000
+--- a/spug_api/apps/monitor/views.py
++++ /dev/null
+@@ -1,267 +0,0 @@
+-# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
+-# Copyright: (c) <spug.dev@gmail.com>
+-# Released under the AGPL-3.0 License.
+-from django.views.generic import View
+-from django.conf import settings
+-from django_redis import get_redis_connection
+-from libs import json_response, JsonParser, Argument, human_datetime, auth
+-from apps.monitor.models import Detection
+-from apps.monitor.executors import dispatch
+-from apps.setting.utils import AppSetting
+-from apps.alarm.models import Alarm
+-from datetime import datetime, timedelta
+-from statistics import mean
+-import json
+-
+-
+-class DetectionView(View):
+-    @auth('dashboard.dashboard.view|monitor.monitor.view')
+-    def get(self, request):
+-        detections = Detection.objects.all()
+-        groups = [x['group'] for x in detections.order_by('group').values('group').distinct()]
+-        return json_response({'groups': groups, 'detections': [x.to_view() for x in detections]})
+-
+-    @auth('monitor.monitor.add|monitor.monitor.edit')
+-    def post(self, request):
+-        form, error = JsonParser(
+-            Argument('id', type=int, required=False),
+-            Argument('name', help='请输入任务名称'),
+-            Argument('group', help='请选择任务分组'),
+-            Argument('targets', type=list, filter=lambda x: len(x), help='请输入监控地址'),
+-            Argument('type', filter=lambda x: x in dict(Detection.TYPES), help='请选择监控类型'),
+-            Argument('extra', required=False),
+-            Argument('desc', required=False),
+-            Argument('rate', type=int, default=5),
+-            Argument('threshold', type=int, default=3),
+-            Argument('quiet', type=int, default=24 * 60),
+-            Argument('notify_grp', type=list, help='请选择报警联系组'),
+-            Argument('notify_mode', type=list, help='请选择报警方式'),
+-        ).parse(request.body)
+-        if error is None:
+-            if set(form.notify_mode).intersection(['1', '2', '6']):
+-                if not AppSetting.get_default('spug_push_key'):
+-                    return json_response(error='报警方式微信、短信、电话需要配置推送服务（系统设置/推送服务设置），请配置后再启用该报警方式。')
+-
+-            form.targets = json.dumps(form.targets)
+-            form.notify_grp = json.dumps(form.notify_grp)
+-            form.notify_mode = json.dumps(form.notify_mode)
+-            if form.id:
+-                Detection.objects.filter(pk=form.id).update(
+-                    updated_at=human_datetime(),
+-                    updated_by=request.user,
+-                    **form)
+-                task = Detection.objects.filter(pk=form.id).first()
+-                if task and task.is_active:
+-                    form.action = 'modify'
+-                    rds_cli = get_redis_connection()
+-                    rds_cli.lpush(settings.MONITOR_KEY, json.dumps(form))
+-            else:
+-                dtt = Detection.objects.create(created_by=request.user, **form)
+-                form.action = 'add'
+-                form.id = dtt.id
+-                rds_cli = get_redis_connection()
+-                rds_cli.lpush(settings.MONITOR_KEY, json.dumps(form))
+-        return json_response(error=error)
+-
+-    @auth('monitor.monitor.edit')
+-    def patch(self, request):
+-        form, error = JsonParser(
+-            Argument('id', type=int, help='请指定操作对象'),
+-            Argument('is_active', type=bool, required=False)
+-        ).parse(request.body, True)
+-        if error is None:
+-            Detection.objects.filter(pk=form.id).update(**form)
+-            if form.get('is_active') is not None:
+-                if form.is_active:
+-                    task = Detection.objects.filter(pk=form.id).first()
+-                    message = {'id': form.id, 'action': 'add'}
+-                    message.update(task.to_dict(selects=('targets', 'extra', 'rate', 'type', 'threshold', 'quiet')))
+-                else:
+-                    message = {'id': form.id, 'action': 'remove'}
+-                rds_cli = get_redis_connection()
+-                rds_cli.lpush(settings.MONITOR_KEY, json.dumps(message))
+-        return json_response(error=error)
+-
+-    @auth('monitor.monitor.del')
+-    def delete(self, request):
+-        form, error = JsonParser(
+-            Argument('id', type=int, help='请指定操作对象')
+-        ).parse(request.GET)
+-        if error is None:
+-            task = Detection.objects.filter(pk=form.id).first()
+-            if task:
+-                if task.is_active:
+-                    return json_response(error='该监控项正在运行中，请先停止后再尝试删除')
+-                task.delete()
+-        return json_response(error=error)
+-
+-
+-@auth('monitor.monitor.add|monitor.monitor.edit')
+-def run_test(request):
+-    form, error = JsonParser(
+-        Argument('type', help='请选择监控类型'),
+-        Argument('targets', type=list, filter=lambda x: len(x), help='请输入监控地址'),
+-        Argument('extra', required=False)
+-    ).parse(request.body)
+-    if error is None:
+-        is_success, message = dispatch(form.type, form.targets[0], form.extra)
+-        return json_response({'is_success': is_success, 'message': message})
+-    return json_response(error=error)
+-
+-
+-def _build_target_status_list():
+-    response = []
+-    rds = get_redis_connection()
+-    for item in Detection.objects.all():
+-        data = {}
+-        for key in json.loads(item.targets):
+-            key = str(key)
+-            data[key] = {
+-                'id': f'{item.id}_{key}',
+-                'group': item.group,
+-                'name': item.name,
+-                'type': item.get_type_display(),
+-                'type_code': item.type,
+-                'target': key,
+-                'desc': item.desc,
+-                'status': '0',
+-                'latest_run_time': item.latest_run_time,
+-            }
+-            if item.is_active:
+-                if item.latest_run_time:
+-                    data[key]['status'] = '1'
+-                else:
+-                    data[key]['status'] = '10'
+-        if item.is_active:
+-            for key, val in rds.hgetall(f'spug:det:{item.id}').items():
+-                prefix, key = key.decode().split('_', 1)
+-                if key in data:
+-                    val = int(val)
+-                    if prefix == 'c':
+-                        if data[key]['status'] == '1':
+-                            data[key]['status'] = '2'
+-                        data[key]['count'] = val
+-                    elif prefix == 't':
+-                        date = datetime.fromtimestamp(val).strftime('%Y-%m-%d %H:%M:%S')
+-                        data[key].update(status='3', notified_at=date)
+-        response.extend(list(data.values()))
+-    return response
+-
+-
+-@auth('monitor.monitor.view')
+-def get_overview(request):
+-    return json_response(_build_target_status_list())
+-
+-
+-def _metric_stats(devices, key):
+-    values = []
+-    for d in devices:
+-        try:
+-            v = json.loads(d.last_value) if d.last_value else {}
+-        except (TypeError, ValueError):
+-            v = {}
+-        if key in v:
+-            values.append(v[key])
+-    if not values:
+-        return {'max': 0, 'avg': 0, 'min': 0}
+-    return {'max': round(max(values), 1), 'avg': round(mean(values), 1), 'min': round(min(values), 1)}
+-
+-
+-def _distribution(devices, key):
+-    buckets = {'≥90%': 0, '70%~90%': 0, '40%~70%': 0, '<40%': 0}
+-    for d in devices:
+-        try:
+-            v = json.loads(d.last_value) if d.last_value else {}
+-        except (TypeError, ValueError):
+-            v = {}
+-        val = v.get(key)
+-        if val is None:
+-            continue
+-        if val >= 90:
+-            buckets['≥90%'] += 1
+-        elif val >= 70:
+-            buckets['70%~90%'] += 1
+-        elif val >= 40:
+-            buckets['40%~70%'] += 1
+-        else:
+-            buckets['<40%'] += 1
+-    return [{'range': k, 'count': v} for k, v in buckets.items()]
+-
+-
+-@auth('monitor.monitor.view')
+-def get_dashboard(request):
+-    """监控中心总览大屏：8类监控资源在线情况 + 主机性能图表 + 资源分布 + 资源总量统计"""
+-    # 延迟导入，避免 apps.monitor 在应用注册阶段对 apps.netmon/apps.host 产生加载期耦合
+-    from apps.netmon.models import Device
+-    from apps.host.models import HostExtend
+-
+-    target_list = _build_target_status_list()
+-    type_stats = []
+-    for code, alias in Detection.TYPES:
+-        items = [x for x in target_list if x['type_code'] == code]
+-        total = len(items)
+-        fault = len([x for x in items if x['status'] == '3'])
+-        online = total - fault
+-        type_stats.append({
+-            'type': code, 'type_alias': alias, 'total': total, 'online': online,
+-            'rate': round(online / total * 100, 1) if total else 0.0,
+-        })
+-
+-    since_1h = (datetime.now() - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+-    recent_alerts_1h = Alarm.objects.filter(status='1', created_at__gte=since_1h).count()
+-
+-    devices = list(Device.objects.all())
+-    bar_charts = {
+-        'traffic': [
+-            {'metric': '主机上行流量(Kb/s)', **_metric_stats(devices, 'net_out')},
+-            {'metric': '主机下行流量(Kb/s)', **_metric_stats(devices, 'net_in')},
+-        ],
+-        'load': [
+-            {'metric': '主机时延(ms)', **_metric_stats(devices, 'rtt')},
+-        ],
+-        'usage': [
+-            {'metric': '主机CPU使用率(%)', **_metric_stats(devices, 'cpu')},
+-            {'metric': '主机内存使用率(%)', **_metric_stats(devices, 'memory')},
+-            {'metric': '磁盘使用率(%)', **_metric_stats(devices, 'disk')},
+-        ],
+-    }
+-
+-    resource_totals = {'cpu_cores': 0, 'memory_gb': 0, 'disk_gb': 0, 'traffic_in_kbps': 0, 'traffic_out_kbps': 0}
+-    for ext in HostExtend.objects.all():
+-        resource_totals['cpu_cores'] += ext.cpu or 0
+-        resource_totals['memory_gb'] += ext.memory or 0
+-        try:
+-            disks = json.loads(ext.disk) if ext.disk else []
+-            resource_totals['disk_gb'] += sum(x.get('size', 0) for x in disks if isinstance(x, dict))
+-        except (TypeError, ValueError):
+-            pass
+-    for d in devices:
+-        try:
+-            v = json.loads(d.last_value) if d.last_value else {}
+-        except (TypeError, ValueError):
+-            v = {}
+-        resource_totals['traffic_in_kbps'] += v.get('net_in', 0)
+-        resource_totals['traffic_out_kbps'] += v.get('net_out', 0)
+-    resource_totals = {k: round(v, 1) for k, v in resource_totals.items()}
+-
+-    host_traffic = []
+-    for d in devices:
+-        try:
+-            v = json.loads(d.last_value) if d.last_value else {}
+-        except (TypeError, ValueError):
+-            v = {}
+-        total = (v.get('net_in', 0) or 0) + (v.get('net_out', 0) or 0)
+-        if total > 0:
+-            host_traffic.append({'name': d.name, 'ip': d.ip, 'value': round(total, 1)})
+-    host_traffic.sort(key=lambda x: -x['value'])
+-
+-    return json_response({
+-        'type_stats': type_stats,
+-        'recent_alerts_1h': recent_alerts_1h,
+-        'resource_total_count': len(devices) + Detection.objects.count(),
+-        'bar_charts': bar_charts,
+-        'memory_distribution': _distribution(devices, 'memory'),
+-        'cpu_distribution': _distribution(devices, 'cpu'),
+-        'resource_totals': resource_totals,
+-        'host_traffic': host_traffic[:10],
+-    })
+diff --git a/spug_api/apps/netmon/anomaly.py b/spug_api/apps/netmon/anomaly.py
+index e869ad7..ec1297a 100644
+--- a/spug_api/apps/netmon/anomaly.py
++++ b/spug_api/apps/netmon/anomaly.py
+@@ -29,7 +29,7 @@ def _match_operator(value, operator, threshold):
+ 
+ 
+ def check_threshold_rules(device, metric_key, value):
+-    from apps.monitor.utils import dispatch_alarm_notify
++    from apps.netmon.notify_utils import dispatch_alarm_notify
+     events = []
+     rules = AlertRule.objects.filter(
+         is_active=True, metric_key=metric_key
+diff --git a/spug_api/apps/netmon/checks.py b/spug_api/apps/netmon/checks.py
+new file mode 100644
+index 0000000..565cebc
+--- /dev/null
++++ b/spug_api/apps/netmon/checks.py
+@@ -0,0 +1,147 @@
++# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
++# Copyright: (c) <spug.dev@gmail.com>
++# Released under the AGPL-3.0 License.
++"""
++可用性检测（CHECK_TYPES）
++------------------------
++本模块合并自原 apps.monitor.executors，是本次"监控中心(monitor) + IT资源监控(netmon)"
++模块统一后的唯一实现，修复了原实现中的问题：
++  * 原 monitor/executors.py 的 docker_check()/log_check() 调用了未导入的 ssh_exec，
++    只要用户配置 Docker检测/日志监控就会直接 NameError 报错，本次已修复。
++  * 原 netmon 的 MONITOR_TYPES 中声明了 'http' 选项，但采集分发从未实现该分支，
++    选择该类型后设备状态永远不会更新，本次已补齐实现。
++
++与 apps.netmon.collectors 中的"指标采集"不同，本模块是"是/否正常"的二元可用性检测，
++统一返回 (is_ok: bool, message: str)。
++"""
++from libs.ssh_executor import ssh_exec, ssh_exec_ok, ping_check
++from socket import socket
++import requests
++import logging
++import json
++import re
++
++logging.captureWarnings(True)
++_CONN_ERR_RE = re.compile(r'Failed to establish a new connection: (.*)\'\)+')
++
++
++def _parse_params(raw):
++    """可用性检测的 extra 字段统一以 JSON 存储检测参数，兼容空值/脏数据"""
++    if not raw:
++        return {}
++    try:
++        data = json.loads(raw)
++        return data if isinstance(data, dict) else {}
++    except (TypeError, ValueError):
++        return {}
++
++
++def http_check(device):
++    params = _parse_params(device.extra)
++    url = params.get('url') or device.ip
++    limit = params.get('timeout_limit_ms')
++    try:
++        res = requests.get(url, timeout=30)
++        if limit:
++            duration = int(res.elapsed.total_seconds() * 1000)
++            if duration > int(limit):
++                return False, f'响应时间 {duration}ms 大于 {limit}ms'
++        return 200 <= res.status_code < 400, f'返回HTTP状态码 {res.status_code}'
++    except Exception as e:
++        error = str(e)
++        matched = _CONN_ERR_RE.findall(error)
++        if matched:
++            error = matched[0]
++        return False, error
++
++
++def port_check(device):
++    params = _parse_params(device.extra)
++    port = params.get('port')
++    if not port:
++        return False, '未配置检测端口'
++    try:
++        sock = socket()
++        sock.settimeout(5)
++        sock.connect((device.ip, int(port)))
++        sock.close()
++        return True, f'端口 {port} 检测正常'
++    except Exception as e:
++        return False, f'端口 {port} 异常信息：{e}'
++
++
++def ping_availability_check(device):
++    return ping_check(device.ip, timeout=3)
++
++
++def process_check(device):
++    if not device.host_id:
++        return False, '未关联主机，无法执行进程检测'
++    params = _parse_params(device.extra)
++    keyword = params.get('keyword', '')
++    if not keyword:
++        return False, '未配置进程关键字'
++    return ssh_exec_ok(device.host, f'ps -ef|grep -v grep|grep {keyword!r}')
++
++
++def docker_check(device):
++    if not device.host_id:
++        return False, '未关联主机，无法执行Docker检测'
++    params = _parse_params(device.extra)
++    container = params.get('container', '')
++    if not container:
++        return False, '未配置容器名称'
++    command = f"docker inspect -f '{{{{.State.Running}}}}' {container!r} 2>&1"
++    exit_code, out = ssh_exec(device.host, command)
++    out = (out or '').strip()
++    if exit_code == 0 and out == 'true':
++        return True, f'容器 {container} 运行中'
++    if 'No such object' in out:
++        return False, f'容器 {container} 不存在'
++    return False, f'容器 {container} 未运行，状态：{out}'
++
++
++def log_check(device):
++    if not device.host_id:
++        return False, '未关联主机，无法执行日志检测'
++    params = _parse_params(device.extra)
++    path, keyword = params.get('path', ''), params.get('keyword', '')
++    tail_lines = params.get('tail_lines') or 200
++    if not path or not keyword:
++        return False, '未配置日志路径/关键字'
++    command = f"tail -n {int(tail_lines)} {path} 2>&1 | grep -c -F {keyword!r}"
++    exit_code, out = ssh_exec(device.host, command)
++    out = (out or '0').strip()
++    count = int(out) if out.isdigit() else 0
++    if count > 0:
++        return False, f'日志 {path} 最近{tail_lines}行中发现 {count} 处关键字「{keyword}」'
++    return True, f'日志 {path} 最近{tail_lines}行未发现关键字「{keyword}」'
++
++
++def shell_check(device):
++    if not device.host_id:
++        return False, '未关联主机，无法执行命令检测'
++    command = device.extra or ''
++    if not command:
++        return False, '未配置检测脚本'
++    return ssh_exec_ok(device.host, command)
++
++
++CHECK_FUNCS = {
++    'http': http_check,
++    'port': port_check,
++    'database': port_check,
++    'ping_check': ping_availability_check,
++    'process': process_check,
++    'docker': docker_check,
++    'log': log_check,
++    'shell': shell_check,
++}
++
++
++def run_check(device):
++    """统一入口：根据设备的可用性检测类型分发，返回 (is_ok, message)"""
++    func = CHECK_FUNCS.get(device.monitor_type)
++    if not func:
++        raise TypeError(f'invalid check type: {device.monitor_type!r}')
++    return func(device)
+diff --git a/spug_api/apps/netmon/executors.py b/spug_api/apps/netmon/executors.py
+index 65aedc9..2492fac 100644
+--- a/spug_api/apps/netmon/executors.py
++++ b/spug_api/apps/netmon/executors.py
+@@ -1,21 +1,31 @@
+ # Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
+ # Copyright: (c) <spug.dev@gmail.com>
+ # Released under the AGPL-3.0 License.
++"""
++统一监控执行入口
++----------------
++每个 Device 按 monitor_type 分为两类工作流，由 runworker 线程池统一调度：
++
++  * METRIC_TYPES（ping/snmp/agent/script）：采集数值型指标 -> 写入 MetricRecord
++    -> AlertRule 阈值规则 / 3-sigma 动态基线做异常检测 -> 更新设备状态。
++  * CHECK_TYPES（http/port/database/ping_check/process/docker/shell/log）：
++    二元可用性检测(是否正常) -> 连续失败次数达到 threshold 后按 quiet 静默期发出告警，
++    此流程合并自原 apps.monitor 模块，语义保持不变。
++"""
++from django_redis import get_redis_connection
+ from apps.netmon.models import Device
+-from apps.netmon import collectors, anomaly, remediation
++from apps.netmon import collectors, anomaly, remediation, checks
++from apps.netmon.notify_utils import handle_check_notify
+ from apps.notify.models import Notify
++from libs import human_datetime
+ import logging
+ import json
++import time
+ 
++DET_KEY = 'spug:netmon:det:{}'  # 可用性检测的连续失败计数/最近告警时间，key结构同原 monitor 实现
+ 
+-def netmon_worker_handler(job):
+-    """由 apps/exec/management/commands/runworker.py 统一的线程池调度执行。
+-    流程：读取设备 -> 采集指标 -> 写时序数据并做异常检测 -> 更新设备状态 -> 触发通知
+-    """
+-    payload = json.loads(job)
+-    device = Device.objects.filter(pk=payload['device_id'], is_active=True).first()
+-    if not device:
+-        return
++
++def _run_metric_flow(device):
+     try:
+         metrics = collectors.collect(device)
+     except Exception as e:
+@@ -23,9 +33,9 @@ def netmon_worker_handler(job):
+         metrics = None
+ 
+     if metrics is None:
+-        # 采集失败（例如 ping 不通）视为离线
+         device.status = 'offline'
+-        device.save(update_fields=['status'])
++        device.latest_check_at = human_datetime()
++        device.save(update_fields=['status', 'latest_check_at'])
+         return
+ 
+     events = anomaly.analyze(device, metrics)
+@@ -44,3 +54,52 @@ def netmon_worker_handler(job):
+             remediation.trigger(device, event)
+         except Exception as e:
+             logging.warning(f'netmon 自动化处置执行异常: {e}')
++
++
++def _run_check_flow(device):
++    try:
++        is_ok, message = checks.run_check(device)
++    except Exception as e:
++        is_ok, message = False, f'检测异常：{e}'
++
++    target = f'{device.host.name}({device.host.hostname})' if device.host_id else f'{device.name}({device.ip})'
++    rds = get_redis_connection()
++    key, f_count, f_time = DET_KEY.format(device.id), 'c', 't'
++    v_count, v_time = rds.hmget(key, f_count, f_time)
++
++    if is_ok:
++        device.status = 'online'
++        device.last_value = json.dumps({'message': message})
++        device.latest_check_at = human_datetime()
++        device.save(update_fields=['status', 'last_value', 'latest_check_at'])
++        if v_count:
++            rds.hdel(key, f_count, f_time)
++        if v_time:
++            logging.warning('send recovery notification')
++            handle_check_notify(device, target, is_ok, message, int(v_count or 0) + 1)
++        return
++
++    device.status = 'offline' if device.monitor_type in ('ping_check', 'port', 'database') else 'critical'
++    device.last_value = json.dumps({'message': message})
++    device.latest_check_at = human_datetime()
++    device.save(update_fields=['status', 'last_value', 'latest_check_at'])
++
++    v_count = rds.hincrby(key, f_count)
++    rds.expire(key, max(device.rate * 20, 3600))
++    if v_count >= device.threshold:
++        if not v_time or int(time.time()) - int(v_time) >= device.quiet * 60:
++            rds.hset(key, f_time, int(time.time()))
++            logging.warning('send fault alarm notification')
++            handle_check_notify(device, target, is_ok, message, v_count)
++
++
++def netmon_worker_handler(job):
++    """由 apps/exec/management/commands/runworker.py 统一的线程池调度执行。"""
++    payload = json.loads(job)
++    device = Device.objects.filter(pk=payload['device_id'], is_active=True).first()
++    if not device:
++        return
++    if device.is_check_type():
++        _run_check_flow(device)
++    else:
++        _run_metric_flow(device)
+diff --git a/spug_api/apps/netmon/management/commands/migrate_legacy_monitor.py b/spug_api/apps/netmon/management/commands/migrate_legacy_monitor.py
+new file mode 100644
+index 0000000..9677468
+--- /dev/null
++++ b/spug_api/apps/netmon/management/commands/migrate_legacy_monitor.py
+@@ -0,0 +1,144 @@
++# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
++# Copyright: (c) <spug.dev@gmail.com>
++# Released under the AGPL-3.0 License.
++"""
++一次性数据迁移命令：把旧版"监控中心"(apps.monitor / detections 表)中的监控项
++迁移为统一后的"IT资源监控"(apps.netmon.models.Device)记录，保证本次模块合并
++不丢失任何已有的监控配置和告警设置。
++
++用法：
++    python manage.py migrate_legacy_monitor          # 正式执行迁移
++    python manage.py migrate_legacy_monitor --dry-run # 仅预览，不写入数据库
++
++说明：
++    * 本命令通过原生 SQL 直接读取 detections 表，不依赖 apps.monitor（该应用已
++      随本次模块统一被移除），因此在旧应用代码删除后依然可以安全运行。
++    * 迁移是幂等的：同一条 Detection 目标已存在对应 Device（相同 name）时会跳过。
++    * 迁移只做"读旧表 -> 写新表"，不会删除或修改 detections 原表，你可以在确认
++      新版 IT资源监控运行正常后自行归档/清理旧表。
++"""
++from django.core.management.base import BaseCommand
++from django.db import connection, transaction
++from apps.netmon.models import Device
++from apps.host.models import Host
++from apps.account.models import User
++import json
++
++# 旧 Detection.type -> 新 Device.monitor_type
++TYPE_MAP = {
++    '1': 'http',        # 站点检测
++    '2': 'port',         # 端口检测
++    '3': 'process',       # 进程检测
++    '4': 'shell',         # 自定义脚本(退出码)
++    '5': 'ping_check',    # Ping检测
++    '6': 'docker',        # Docker检测
++    '7': 'database',      # 数据库检测
++    '8': 'log',           # 日志监控
++}
++HOST_BASED_TYPES = {'3', '4', '6', '8'}  # 这些类型的 target 存的是 host_id
++
++
++class Command(BaseCommand):
++    help = '将旧版监控中心(detections表)的数据迁移为统一后的 IT资源监控(Device) 记录'
++
++    def add_arguments(self, parser):
++        parser.add_argument('--dry-run', action='store_true', help='只打印将要执行的迁移，不实际写入')
++
++    def handle(self, *args, **options):
++        dry_run = options['dry_run']
++        if not self._table_exists('detections'):
++            self.stdout.write(self.style.WARNING('未发现 detections 表，可能已迁移过或本来就是全新安装，无需迁移。'))
++            return
++
++        rows = self._fetch_detections()
++        if not rows:
++            self.stdout.write(self.style.WARNING('detections 表中没有数据，无需迁移。'))
++            return
++
++        fallback_user = User.objects.filter(is_supper=True).first() or User.objects.first()
++        created, skipped, failed = 0, 0, 0
++
++        for row in rows:
++            try:
++                targets = json.loads(row['targets'] or '[]')
++            except (TypeError, ValueError):
++                targets = []
++            new_type = TYPE_MAP.get(row['type'])
++            if not new_type:
++                self.stdout.write(self.style.WARNING(f"跳过未知类型的监控项 id={row['id']} type={row['type']}"))
++                failed += 1
++                continue
++
++            for target in targets:
++                target = str(target)
++                device_name = f"{row['name']}-{target}" if len(targets) > 1 else row['name']
++                if Device.objects.filter(name=device_name).exists():
++                    skipped += 1
++                    continue
++
++                host_id, ip, extra = None, target, row['extra'] or ''
++                if row['type'] in HOST_BASED_TYPES:
++                    host = Host.objects.filter(pk=target).first()
++                    if not host:
++                        self.stdout.write(self.style.WARNING(
++                            f"监控项【{row['name']}】关联的主机(id={target})已不存在，跳过该条目"))
++                        failed += 1
++                        continue
++                    host_id, ip = host.id, host.hostname
++                    if row['type'] == '3':
++                        extra_json = {'keyword': row['extra'] or ''}
++                    elif row['type'] == '6':
++                        extra_json = {'container': row['extra'] or ''}
++                    elif row['type'] == '8':
++                        path, _, keyword = (row['extra'] or '').partition('||')
++                        extra_json = {'path': path, 'keyword': keyword, 'tail_lines': 200}
++                    else:  # '4' shell，保持原始脚本文本，不做 JSON 包装
++                        extra_json = None
++                    extra = row['extra'] if extra_json is None else json.dumps(extra_json, ensure_ascii=False)
++                elif row['type'] in ('2', '7'):
++                    extra = json.dumps({'port': row['extra']}, ensure_ascii=False)
++                elif row['type'] == '1':
++                    extra = json.dumps(
++                        {'url': target, 'timeout_limit_ms': int(row['extra'])} if row['extra'] else {'url': target},
++                        ensure_ascii=False)
++                    ip = target
++
++                self.stdout.write(
++                    f"{'[预览] ' if dry_run else ''}迁移【{row['name']}】-> Device(name={device_name}, "
++                    f"monitor_type={new_type}, ip={ip}, host_id={host_id})")
++                if dry_run:
++                    created += 1
++                    continue
++
++                with transaction.atomic():
++                    Device.objects.create(
++                        name=device_name, ip=ip or '0.0.0.0', category='other', monitor_type=new_type,
++                        host_id=host_id, extra=extra, rate=max(int(row['rate'] or 5) * 60, 60),
++                        threshold=row['threshold'] or 3, quiet=row['quiet'] or 24 * 60,
++                        notify_grp=row['notify_grp'] or '[]', notify_mode=row['notify_mode'] or '[]',
++                        is_active=bool(row['is_active']), desc=row['desc'],
++                        created_by=fallback_user,
++                    )
++                created += 1
++
++        self.stdout.write(self.style.SUCCESS(
++            f"迁移完成：{'（预览模式，未实际写入）' if dry_run else ''}"
++            f"新建 {created} 条，跳过(已存在) {skipped} 条，失败 {failed} 条。"
++        ))
++        if not dry_run and created:
++            self.stdout.write(self.style.WARNING(
++                '提示：detections 原表数据未被删除，请在确认新版 IT资源监控运行正常后自行归档/清理。'))
++
++    @staticmethod
++    def _table_exists(table_name):
++        return table_name in connection.introspection.table_names()
++
++    @staticmethod
++    def _fetch_detections():
++        with connection.cursor() as cursor:
++            cursor.execute(
++                'SELECT id, name, type, targets, extra, `desc`, is_active, rate, threshold, quiet, '
++                'notify_mode, notify_grp FROM detections'
++            )
++            columns = [c[0] for c in cursor.description]
++            return [dict(zip(columns, r)) for r in cursor.fetchall()]
+diff --git a/spug_api/apps/monitor/management/commands/runmonitor.py b/spug_api/apps/netmon/management/commands/runmonitor.py
+similarity index 80%
+rename from spug_api/apps/monitor/management/commands/runmonitor.py
+rename to spug_api/apps/netmon/management/commands/runmonitor.py
+index 16d5cba..85d3342 100644
+--- a/spug_api/apps/monitor/management/commands/runmonitor.py
++++ b/spug_api/apps/netmon/management/commands/runmonitor.py
+@@ -2,14 +2,14 @@
+ # Copyright: (c) <spug.dev@gmail.com>
+ # Released under the AGPL-3.0 License.
+ from django.core.management.base import BaseCommand
+-from apps.monitor.scheduler import Scheduler
++from apps.netmon.scheduler import Scheduler
+ import logging
+ 
+ logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(message)s')
+ 
+ 
+ class Command(BaseCommand):
+-    help = 'Start unified scheduler (monitor + netmon)'
++    help = 'Start unified monitor scheduler (netmon)'
+ 
+     def handle(self, *args, **options):
+         s = Scheduler()
+diff --git a/spug_api/apps/netmon/models.py b/spug_api/apps/netmon/models.py
+index be852af..a5c168c 100644
+--- a/spug_api/apps/netmon/models.py
++++ b/spug_api/apps/netmon/models.py
+@@ -23,13 +23,25 @@ class Device(models.Model, ModelMixin):
+         ('application', '业务应用'),
+         ('other', '其他'),
+     )
+-    MONITOR_TYPES = (
+-        ('ping', 'Ping探测'),
++    # 指标采集类（写入 MetricRecord，走 AlertRule / 动态基线异常检测）
++    METRIC_TYPES = (
++        ('ping', 'Ping探测(指标采集)'),
+         ('snmp', 'SNMP采集'),
+         ('agent', 'Agent(SSH)采集'),
+-        ('http', 'HTTP探测'),
+-        ('script', '自定义脚本'),
++        ('script', '自定义采集脚本(数值)'),
+     )
++    # 可用性检测类（原 monitor.Detection 迁移而来，走 threshold/quiet 阈值告警）
++    CHECK_TYPES = (
++        ('http', 'HTTP/站点检测'),
++        ('port', '端口检测'),
++        ('database', '数据库端口检测'),
++        ('ping_check', 'Ping可用性检测(阈值告警)'),
++        ('process', '进程检测'),
++        ('docker', 'Docker容器检测'),
++        ('shell', '命令检测(退出码)'),
++        ('log', '日志关键字监控'),
++    )
++    MONITOR_TYPES = METRIC_TYPES + CHECK_TYPES
+     STATUSES = (
+         ('unknown', '未知'),
+         ('online', '正常'),
+@@ -51,28 +63,46 @@ class Device(models.Model, ModelMixin):
+     snmp_version = models.CharField(max_length=5, default='2c')
+     snmp_community = models.CharField(max_length=50, default='public')
+     snmp_port = models.IntegerField(default=161)
+-    extra = models.TextField(null=True, blank=True, help_text='自定义脚本内容')
++    extra = models.TextField(null=True, blank=True, help_text='采集脚本内容，或可用性检测的参数(JSON)，含义随monitor_type而定')
+ 
+-    rate = models.IntegerField(default=60, help_text='采集周期(秒)')
++    rate = models.IntegerField(default=60, help_text='采集/检测周期(秒)')
+     status = models.CharField(max_length=10, choices=STATUSES, default='unknown')
+     last_value = models.TextField(null=True, blank=True, help_text='最近一次采集到的指标快照(JSON)')
+     latest_check_at = models.CharField(max_length=20, null=True)
+     is_active = models.BooleanField(default=True)
+     desc = models.CharField(max_length=255, null=True, blank=True)
+ 
++    # ---- 可用性检测(CHECK_TYPES)专用告警参数：由原 monitor.Detection 合并而来 ----
++    threshold = models.IntegerField(default=3, help_text='连续失败多少次后判定为故障并发出告警(仅可用性检测类型)')
++    quiet = models.IntegerField(default=24 * 60, help_text='同一故障的告警静默期(分钟)，避免重复刷屏(仅可用性检测类型)')
++    notify_grp = models.CharField(max_length=255, default='[]', help_text='告警联系组id列表(JSON，仅可用性检测类型)')
++    notify_mode = models.CharField(max_length=255, default='[]', help_text='告警方式列表(JSON，仅可用性检测类型)')
++
+     created_at = models.CharField(max_length=20, default=human_datetime)
+     created_by = models.ForeignKey(User, models.PROTECT, related_name='+')
+ 
++    def is_check_type(self):
++        return self.monitor_type in dict(self.CHECK_TYPES)
++
+     def to_view(self):
+         tmp = self.to_dict()
+         tmp['category_alias'] = self.get_category_display()
+         tmp['monitor_type_alias'] = self.get_monitor_type_display()
+         tmp['status_alias'] = self.get_status_display()
+         tmp['group_name'] = self.group.name if self.group_id else None
++        tmp['is_check_type'] = self.is_check_type()
+         try:
+             tmp['last_value'] = json.loads(self.last_value) if self.last_value else {}
+         except (TypeError, ValueError):
+             tmp['last_value'] = {}
++        try:
++            tmp['notify_grp'] = json.loads(self.notify_grp) if self.notify_grp else []
++        except (TypeError, ValueError):
++            tmp['notify_grp'] = []
++        try:
++            tmp['notify_mode'] = json.loads(self.notify_mode) if self.notify_mode else []
++        except (TypeError, ValueError):
++            tmp['notify_mode'] = []
+         return tmp
+ 
+     def __repr__(self):
+diff --git a/spug_api/apps/netmon/notify_utils.py b/spug_api/apps/netmon/notify_utils.py
+new file mode 100644
+index 0000000..54af1db
+--- /dev/null
++++ b/spug_api/apps/netmon/notify_utils.py
+@@ -0,0 +1,75 @@
++# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
++# Copyright: (c) <spug.dev@gmail.com>
++# Released under the AGPL-3.0 License.
++"""
++告警通知统一入口
++----------------
++本模块合并自原 apps.monitor.utils，是"监控中心 + IT资源监控"模块统一后
++产生告警通知的唯一入口：统一写入 apps.alarm.models.Alarm（告警历史），
++并通过 apps.alarm 配置的联系组 + 多渠道（微信/短信/钉钉/邮件/企业微信/电话/飞书）发送通知。
++"""
++from django.db import close_old_connections
++from apps.alarm.models import Alarm
++from libs.spug import Notification
++import json
++
++
++def seconds_to_human(seconds):
++    text = ''
++    if seconds > 3600:
++        text = f'{int(seconds / 3600)}小时'
++        seconds = seconds % 3600
++    if seconds > 60:
++        text += f'{int(seconds / 60)}分钟'
++        seconds = seconds % 60
++    if seconds:
++        text += f'{seconds}秒'
++    return text
++
++
++def _record_alarm(name, type_alias, target, duration, status, notify_grp, notify_mode):
++    Alarm.objects.create(
++        name=name,
++        type=type_alias,
++        target=target,
++        status=status,
++        duration=duration,
++        notify_grp=notify_grp,
++        notify_mode=notify_mode)
++
++
++def handle_check_notify(device, target, is_ok, out, fault_times):
++    """可用性检测(CHECK_TYPES)专用：按 device.threshold/quiet 判断是否发出故障/恢复通知，
++    对应原 monitor.utils.handle_notify，语义完全保持不变。
++    """
++    close_old_connections()
++    duration = seconds_to_human(device.rate * fault_times)
++    event = '2' if is_ok else '1'
++    type_alias = device.get_monitor_type_display()
++    _record_alarm(device.name, type_alias, target, duration, event, device.notify_grp, device.notify_mode)
++    grp = json.loads(device.notify_grp) if device.notify_grp else []
++    if not grp:
++        return
++    notify = Notification(grp, event, target, device.name, out, duration)
++    notify.dispatch_monitor(json.loads(device.notify_mode) if device.notify_mode else [])
++
++
++def dispatch_alarm_notify(name, target, message, notify_grp, notify_mode, level='warning'):
++    """通用告警通知入口，供指标类监控(AlertRule阈值/动态基线异常)调用，统一走
++    alarm 联系组 + 多渠道通知，并写入 Alarm 表使告警历史可追溯。
++    """
++    close_old_connections()
++    grp = json.loads(notify_grp) if isinstance(notify_grp, str) else (notify_grp or [])
++    modes = json.loads(notify_mode) if isinstance(notify_mode, str) else (notify_mode or [])
++    event = '1'
++    Alarm.objects.create(
++        name=name,
++        type='netmon',
++        target=target,
++        status=event,
++        duration='-',
++        notify_grp=json.dumps(grp),
++        notify_mode=json.dumps(modes))
++    if grp and modes:
++        notify = Notification(grp, event, target, name, message, '-')
++        notify.dispatch_monitor(modes)
+diff --git a/spug_api/apps/netmon/scheduler.py b/spug_api/apps/netmon/scheduler.py
+new file mode 100644
+index 0000000..ecad129
+--- /dev/null
++++ b/spug_api/apps/netmon/scheduler.py
+@@ -0,0 +1,84 @@
++# Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
++# Released under the AGPL-3.0 License.
++"""
++统一监控调度器
++--------------
++本文件由原 apps/monitor/scheduler.py 迁移合并而来：monitor(Detection) 与
++netmon(Device) 曾是两套并行的定时调度实现，现已统一为对 Device 表的单一调度，
++不再区分"监控中心"和"IT资源监控"两套数据源。
++"""
++from apscheduler.schedulers.background import BackgroundScheduler
++from apscheduler.executors.pool import ThreadPoolExecutor
++from apscheduler.triggers.interval import IntervalTrigger
++from django_redis import get_redis_connection
++from django.conf import settings
++from django.db import connections
++from django.db.utils import DatabaseError
++from apps.netmon.models import Device
++from apps.netmon.anomaly import check_escalations
++from libs import AttrDict
++from datetime import datetime, timedelta
++from random import randint
++import logging
++import json
++
++NETMON_KEY = settings.NETMON_KEY
++NETMON_WORKER_KEY = settings.NETMON_WORKER_KEY
++
++
++class Scheduler:
++    """统一调度器：管理全部 netmon(Device) 定时任务，涵盖指标采集与可用性检测两类。
++    任务通过 Redis 队列分发到 runworker 线程池异步执行。
++    """
++    timezone = settings.TIME_ZONE
++
++    def __init__(self):
++        self.scheduler = BackgroundScheduler(timezone=self.timezone, executors={'default': ThreadPoolExecutor(30)})
++
++    def _dispatch(self, device_id):
++        rds_cli = get_redis_connection()
++        rds_cli.rpush(NETMON_WORKER_KEY, json.dumps({'device_id': device_id}))
++        connections.close_all()
++
++    def _safe_check_escalations(self):
++        try:
++            check_escalations()
++        except DatabaseError:
++            pass
++        finally:
++            connections.close_all()
++
++    def _init(self):
++        self.scheduler.start()
++        self.scheduler.add_job(
++            self._safe_check_escalations, IntervalTrigger(seconds=60, timezone=self.timezone), id='netmon_escalation'
++        )
++        try:
++            for item in Device.objects.filter(is_active=True):
++                trigger = IntervalTrigger(seconds=int(item.rate), timezone=self.timezone)
++                self.scheduler.add_job(
++                    self._dispatch, trigger, id=f'netmon_{item.id}', args=(item.id,),
++                    next_run_time=datetime.now() + timedelta(seconds=randint(0, 30))
++                )
++            connections.close_all()
++        except DatabaseError:
++            pass
++
++    def run(self):
++        rds_cli = get_redis_connection()
++        self._init()
++        rds_cli.delete(NETMON_KEY)
++        logging.warning('Running unified monitor scheduler (netmon)')
++        while True:
++            _, data = rds_cli.brpop([NETMON_KEY])
++            task = AttrDict(json.loads(data))
++            job_id = f'netmon_{task.id}'
++            if task.action in ('add', 'modify'):
++                trigger = IntervalTrigger(seconds=int(task.rate), timezone=self.timezone)
++                self.scheduler.add_job(
++                    self._dispatch, trigger, id=job_id, args=(task.id,), replace_existing=True
++                )
++            elif task.action == 'remove':
++                job = self.scheduler.get_job(job_id)
++                if job:
++                    job.remove()
+diff --git a/spug_api/apps/netmon/views.py b/spug_api/apps/netmon/views.py
+index 9e293ff..f126b07 100644
+--- a/spug_api/apps/netmon/views.py
++++ b/spug_api/apps/netmon/views.py
+@@ -11,7 +11,8 @@ from apps.netmon.models import (
+     MaintenanceWindow, RemediationAction, RemediationLog
+ )
+ 
+-from apps.netmon import discovery, reports as report_builder, stats as stats_builder, collectors
++from apps.netmon import discovery, reports as report_builder, stats as stats_builder, collectors, checks
++from apps.setting.utils import AppSetting
+ from threading import Thread
+ from datetime import datetime, timedelta
+ from statistics import mean
+@@ -54,8 +55,17 @@ class DeviceView(View):
+             Argument('extra', required=False),
+             Argument('rate', type=int, default=60),
+             Argument('desc', required=False),
++            Argument('threshold', type=int, default=3),
++            Argument('quiet', type=int, default=24 * 60),
++            Argument('notify_grp', type=list, default=[]),
++            Argument('notify_mode', type=list, default=[]),
+         ).parse(request.body)
+         if error is None:
++            if set(form.notify_mode).intersection(['1', '2', '6']):
++                if not AppSetting.get_default('spug_push_key'):
++                    return json_response(error='报警方式微信、短信、电话需要配置推送服务（系统设置/推送服务设置），请配置后再启用该报警方式。')
++            form.notify_grp = json.dumps(form.notify_grp)
++            form.notify_mode = json.dumps(form.notify_mode)
+             device_id = form.pop('id', None)
+             rds_cli = get_redis_connection()
+             if device_id:
+@@ -151,6 +161,7 @@ def test_connectivity(request):
+         Argument('snmp_community', default='public'),
+         Argument('snmp_port', type=int, default=161),
+         Argument('host_id', type=int, required=False),
++        Argument('extra', required=False),
+     ).parse(request.body)
+     if error:
+         return json_response(error=error)
+@@ -159,10 +170,16 @@ def test_connectivity(request):
+     else:
+         device = Device(
+             ip=form.ip, monitor_type=form.monitor_type, snmp_community=form.snmp_community,
+-            snmp_port=form.snmp_port, host_id=form.host_id
++            snmp_port=form.snmp_port, host_id=form.host_id, extra=form.extra
+         )
+     if not device:
+         return json_response(error='设备不存在')
++    if device.is_check_type():
++        try:
++            is_ok, message = checks.run_check(device)
++        except Exception as e:
++            return json_response({'success': False, 'message': str(e)})
++        return json_response({'success': is_ok, 'message': message})
+     try:
+         result = collectors.collect(device)
+     except Exception as e:
+@@ -211,11 +228,44 @@ class TopologyView(View):
+         return json_response(error=error)
+ 
+ 
++def _metric_stats(devices, key):
++    values = []
++    for d in devices:
++        try:
++            v = json.loads(d.last_value) if d.last_value else {}
++        except (TypeError, ValueError):
++            v = {}
++        if key in v:
++            values.append(v[key])
++    if not values:
++        return {'max': 0, 'avg': 0, 'min': 0}
++    return {'max': round(max(values), 1), 'avg': round(mean(values), 1), 'min': round(min(values), 1)}
++
++
++def _distribution(devices, key):
++    buckets = {'≥90%': 0, '70%~90%': 0, '40%~70%': 0, '<40%': 0}
++    for d in devices:
++        try:
++            v = json.loads(d.last_value) if d.last_value else {}
++        except (TypeError, ValueError):
++            v = {}
++        val = v.get(key)
++        if val is None:
++            continue
++        if val >= 90:
++            buckets['≥90%'] += 1
++        elif val >= 70:
++            buckets['70%~90%'] += 1
++        elif val >= 40:
++            buckets['40%~70%'] += 1
++        else:
++            buckets['<40%'] += 1
++    return [{'range': k, 'count': v} for k, v in buckets.items()]
++
++
+ # ------------------------------------------------------------------ 实时总览大屏 -----
+ @auth('netmon.device.view')
+ def get_overview(request):
+-    from apps.monitor.models import Detection
+-    from apps.monitor.views import _build_target_status_list, _metric_stats, _distribution
+     from apps.host.models import HostExtend
+     from apps.alarm.models import Alarm
+ 
+@@ -246,14 +296,13 @@ def get_overview(request):
+     trend = stats_builder.anomaly_trend(all_devices, days=14)
+     top_faulty = stats_builder.top_faulty_devices(all_devices, since_7d, now_str, limit=5)
+ 
+-    # ---- 合并自原 monitor Dashboard 的数据 ----
+-    target_list = _build_target_status_list()
++    # ---- 可用性检测类设备（原 monitor 模块的检测能力，现已统一到 Device 模型）的在线率统计 ----
++    check_devices = [d for d in all_devices if d.is_check_type()]
+     type_stats = []
+-    for code, alias in Detection.TYPES:
+-        items = [x for x in target_list if x['type_code'] == code]
++    for code, alias in Device.CHECK_TYPES:
++        items = [d for d in check_devices if d.monitor_type == code]
+         total = len(items)
+-        fault = len([x for x in items if x['status'] == '3'])
+-        online = total - fault
++        online = len([d for d in items if d.status not in ('critical', 'offline')])
+         type_stats.append({
+             'type': code, 'type_alias': alias, 'total': total, 'online': online,
+             'rate': round(online / total * 100, 1) if total else 0.0,
+@@ -320,7 +369,7 @@ def get_overview(request):
+         'top_faulty_7d': top_faulty,
+         'type_stats': type_stats,
+         'recent_alerts_1h': recent_alerts_1h,
+-        'resource_total_count': len(dev_list) + Detection.objects.count(),
++        'resource_total_count': devices.count(),
+         'bar_charts': bar_charts,
+         'memory_distribution': _distribution(dev_list, 'memory'),
+         'cpu_distribution': _distribution(dev_list, 'cpu'),
+diff --git a/spug_api/spug/settings.py b/spug_api/spug/settings.py
+index 1e79772..7ef4a36 100644
+--- a/spug_api/spug/settings.py
++++ b/spug_api/spug/settings.py
+@@ -39,7 +39,6 @@ INSTALLED_APPS = [
+     'apps.setting',
+     'apps.exec',
+     'apps.schedule',
+-    'apps.monitor',
+     'apps.alarm',
+     'apps.config',
+     'apps.app',
+@@ -107,8 +106,6 @@ TEMPLATES = [
+ TOKEN_TTL = 8 * 3600
+ SCHEDULE_KEY = 'spug:schedule'
+ SCHEDULE_WORKER_KEY = 'spug:schedule:worker'
+-MONITOR_KEY = 'spug:monitor'
+-MONITOR_WORKER_KEY = 'spug:monitor:worker'
+ EXEC_WORKER_KEY = 'spug:exec:worker'
+ NETMON_KEY = 'spug:netmon'
+ NETMON_WORKER_KEY = 'spug:netmon:worker'
+diff --git a/spug_api/spug/urls.py b/spug_api/spug/urls.py
+index 63b78ba..5e65e2b 100644
+--- a/spug_api/spug/urls.py
++++ b/spug_api/spug/urls.py
+@@ -23,7 +23,6 @@ urlpatterns = [
+     path('host/', include('apps.host.urls')),
+     path('exec/', include('apps.exec.urls')),
+     path('schedule/', include('apps.schedule.urls')),
+-    path('monitor/', include('apps.monitor.urls')),
+     path('alarm/', include('apps.alarm.urls')),
+     path('setting/', include('apps.setting.urls')),
+     path('config/', include('apps.config.urls')),
+diff --git a/spug_web/src/pages/dashboard/AlarmTrend.js b/spug_web/src/pages/dashboard/AlarmTrend.js
+index 4f2b68e..49f0e66 100644
+--- a/spug_web/src/pages/dashboard/AlarmTrend.js
++++ b/spug_web/src/pages/dashboard/AlarmTrend.js
+@@ -23,13 +23,14 @@ export default function () {
+ 
+   useEffect(() => {
+     const data = {};
+-    http.get('/api/monitor/')
++    http.get('/api/netmon/device/')
+       .then(res => {
+-        for (let item of res.detections) {
+-          if (!data[item.type]) {
+-            data[item.type] = {value: item.type_alias, label: item.type_alias, children: []}
++        for (let item of res) {
++          const key = item.monitor_type_alias;
++          if (!data[key]) {
++            data[key] = {value: key, label: key, children: []}
+           }
+-          data[item.type].children.push({value: item.name, label: item.name})
++          data[key].children.push({value: item.name, label: item.name})
+         }
+         setOptions(Object.values(data))
+       })
+diff --git a/spug_web/src/pages/monitor/Form.js b/spug_web/src/pages/monitor/Form.js
+deleted file mode 100644
+index e540c43..0000000
+--- a/spug_web/src/pages/monitor/Form.js
++++ /dev/null
+@@ -1,38 +0,0 @@
+-/**
+- * Copyright (c) OpenSpug Organization. https://github.com/openspug/spug
+- * Copyright (c) <spug.dev@gmail.com>
+- * Released under the AGPL-3.0 License.
+- */
+-import React, {useEffect} from 'react';
+-import { observer } from 'mobx-react';
+-import { Modal, Steps } from 'antd';
+-import Step1 from './Step1';
+-import Step2 from './Step2';
+-import store from './store';
+-import styles from './index.module.less';
+-import groupStore from '../alarm/group/store';
+-
+-export default observer(function () {
+-  useEffect(() => {
+-    if (groupStore.records.length === 0) {
+-      groupStore.fetchRecords();
+-    }
+-  }, [])
+-
+-  return (
+-    <Modal
+-      visible
+-      width={800}
+-      maskClosable={false}
+-      title={store.record.id ? '编辑任务' : '新建任务'}
+-      onCancel={() => store.formVisible = false}
+-      footer={null}>
+-      <Steps current={store.page} className={styles.steps}>
+-        <Steps.Step key={0} title="创建任务"/>
+-        <Steps.Step key={1} title="设置规则"/>
+-      </Steps>
+-      {store.page === 0 && <Step1/>}
+-      {store.page === 1 && <Step2/>}
+-    </Modal>
+-  )
+-})
+diff --git a/spug_web/src/pages/monitor/MonitorCard.js b/spug_web/src/pages/monitor/MonitorCard.js
+deleted file mode 100644
+index 79885cd..0000000
+--- a/spug_web/src/pages/monitor/MonitorCard.js
++++ /dev/null
+@@ -1,128 +0,0 @@
+-/**
+- * Copyright (c) OpenSpug Organization. https://github.com/openspug/spug
+- * Copyright (c) <spug.dev@gmail.com>
+- * Released under the AGPL-3.0 License.
+- */
+-import React, { useState, useEffect } from 'react';
+-import { observer } from 'mobx-react';
+-import { Card, Input, Select, Space, Tooltip, Spin, message } from 'antd';
+-import { FrownOutlined, ReloadOutlined, SyncOutlined } from '@ant-design/icons';
+-import styles from './index.module.less';
+-import store from './store';
+-
+-const StyleMap = {
+-  '0': {background: '#99999933', border: '1px solid #999', color: '#999999'},
+-  '1': {background: '#16a98733', border: '1px solid #16a987', color: '#16a987'},
+-  '2': {background: '#ffba0033', border: '1px solid #ffba00', color: '#ffba00'},
+-  '3': {background: '#f2655d33', border: '1px solid #f2655d', color: '#f2655d'},
+-  '10': {background: '#99999919', border: '1px dashed #999999', color: '#999999'}
+-}
+-
+-const StatusMap = {
+-  '1': '正常',
+-  '2': '警告',
+-  '3': '紧急',
+-  '0': '未激活',
+-  '10': '待调度'
+-}
+-
+-function CardItem(props) {
+-  const {status, type, group, desc, name, target, latest_run_time} = props.data
+-  const title = (
+-    <div>
+-      <div>分组: {group}</div>
+-      <div>类型: {type}</div>
+-      <div>名称: {name}</div>
+-      <div>目标: {target}</div>
+-      <div>状态: {StatusMap[status]}</div>
+-      <div>更新: {latest_run_time || '---'}</div>
+-      <div>描述: {desc}</div>
+-    </div>
+-  )
+-  return (
+-    <Tooltip title={title}>
+-      <div className={styles.card} style={StyleMap[status]}/>
+-    </Tooltip>
+-  )
+-}
+-
+-function MonitorCard() {
+-  const [autoReload, setAutoReload] = useState(false);
+-  const [status, setStatus] = useState();
+-
+-  useEffect(() => {
+-    store.fetchOverviews()
+-
+-    return () => store.autoReload = null
+-    // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, [])
+-
+-  function handleAutoReload() {
+-    store.autoReload = !autoReload
+-    message.info(autoReload ? '关闭自动刷新' : '开启自动刷新')
+-    if (!autoReload) store.fetchOverviews()
+-    setAutoReload(!autoReload)
+-  }
+-
+-  const filteredRecords = store.ovDataSource.filter(x => !status || x.status === status)
+-  return (
+-    <Card title="总览" style={{marginBottom: 24}} bodyStyle={{padding: '12px 24px'}} extra={(
+-      <Space size="middle">
+-        <Space>
+-          <div>分组：</div>
+-          <Select allowClear style={{minWidth: 150}} value={store.f_group} onChange={v => store.f_group = v}
+-                  placeholder="请选择">
+-            {store.groups.map(item => (
+-              <Select.Option value={item} key={item}>{item}</Select.Option>
+-            ))}
+-          </Select>
+-        </Space>
+-        <Space>
+-          <div>类型：</div>
+-          <Select allowClear style={{width: 120}} value={store.f_type} onChange={v => store.f_type = v}
+-                  placeholder="请选择">
+-            {store.types.map(item => <Select.Option key={item} value={item}>{item}</Select.Option>)}
+-          </Select>
+-        </Space>
+-        <Space>
+-          <div>名称：</div>
+-          <Input allowClear value={store.f_name} onChange={e => store.f_name = e.target.value} placeholder="请输入"/>
+-        </Space>
+-      </Space>
+-    )}>
+-      <Spin spinning={store.ovFetching}>
+-        <div className={styles.header}>
+-          {Object.entries(StyleMap).map(([s, style]) => {
+-            const count = store.ovDataSource.filter(x => x.status === s).length;
+-            return count ? (
+-              <Tooltip key={s} title={StatusMap[s]}>
+-                <div
+-                  className={styles.item}
+-                  style={s === status ? style : {...style, background: '#fff'}}
+-                  onClick={() => setStatus(s === status ? '' : s)}>
+-                  {store.ovDataSource.filter(x => x.status === s).length}
+-                </div>
+-              </Tooltip>
+-            ) : null
+-          })}
+-          <Tooltip title="自动刷新">
+-            <div className={styles.autoLoad} onClick={handleAutoReload}>
+-              {autoReload ? <SyncOutlined spin style={{color: '#2563fc'}}/> : <ReloadOutlined/>}
+-            </div>
+-          </Tooltip>
+-        </div>
+-        {filteredRecords.length > 0 ? (
+-          <Space wrap size={4}>
+-            {filteredRecords.map(item => (
+-              <CardItem key={item.id} data={item}/>
+-            ))}
+-          </Space>
+-        ) : (
+-          <div className={styles.notMatch}><FrownOutlined/></div>
+-        )}
+-      </Spin>
+-    </Card>
+-  )
+-}
+-
+-export default observer(MonitorCard)
+\ No newline at end of file
+diff --git a/spug_web/src/pages/monitor/Step1.js b/spug_web/src/pages/monitor/Step1.js
+deleted file mode 100644
+index c2ddbb2..0000000
+--- a/spug_web/src/pages/monitor/Step1.js
++++ /dev/null
+@@ -1,207 +0,0 @@
+-/**
+- * Copyright (c) OpenSpug Organization. https://github.com/openspug/spug
+- * Copyright (c) <spug.dev@gmail.com>
+- * Released under the AGPL-3.0 License.
+- */
+-import React, { useState } from 'react';
+-import { observer } from 'mobx-react';
+-import { ExclamationCircleOutlined } from '@ant-design/icons';
+-import { Modal, Form, Input, Select, Button, message } from 'antd';
+-import TemplateSelector from '../exec/task/TemplateSelector';
+-import HostSelector from 'pages/host/Selector';
+-import { LinkButton, ACEditor } from 'components';
+-import { http, cleanCommand } from 'libs';
+-import store from './store';
+-import lds from 'lodash';
+-
+-const helpMap = {
+-  '1': '返回HTTP状态码200-399则判定为正常，其他为异常。',
+-  '4': '脚本执行退出状态码为 0 则判定为正常，其他为异常。',
+-  '6': '通过 docker inspect 判断容器运行状态，Running 为正常，其他为异常。',
+-  '7': '对数据库监听端口发起TCP连接，连接成功判定为正常（不校验账号密码）。',
+-  '8': '检测日志文件最近N行内容中是否出现指定关键字（如 ERROR/Exception），出现则判定为异常。',
+-}
+-
+-const DB_PORTS = {
+-  MySQL: 3306, MariaDB: 3306, Oracle: 1521, PostgreSQL: 5432,
+-  SQLServer: 1433, Redis: 6379, MongoDB: 27017,
+-}
+-
+-export default observer(function () {
+-  const [loading, setLoading] = useState(false);
+-  const [showTmp, setShowTmp] = useState(false);
+-
+-  function handleTest() {
+-    setLoading(true)
+-    const formData = lds.pick(store.record, ['type', 'targets', 'extra'])
+-    http.post('/api/monitor/test/', formData, {timeout: 120000})
+-      .then(res => {
+-        if (res.is_success) {
+-          Modal.success({content: res.message})
+-        } else {
+-          Modal.warning({content: res.message})
+-        }
+-      })
+-      .finally(() => setLoading(false))
+-  }
+-
+-  function handleChangeType(v) {
+-    store.record.type = v;
+-    store.record.targets = [];
+-    store.record.extra = undefined;
+-  }
+-
+-  function handleAddGroup() {
+-    Modal.confirm({
+-      icon: <ExclamationCircleOutlined/>,
+-      title: '添加监控分组',
+-      content: (
+-        <Form layout="vertical" style={{marginTop: 24}}>
+-          <Form.Item required label="监控分组">
+-            <Input onChange={e => store.record.group = e.target.value}/>
+-
+-          </Form.Item>
+-        </Form>
+-      ),
+-      onOk: () => {
+-        if (store.record.group) {
+-          store.groups.push(store.record.group);
+-        }
+-      },
+-    })
+-  }
+-
+-  function canNext() {
+-    const {type, targets, extra, group} = store.record;
+-    const is_verify = name && group && targets.length;
+-    if (['2', '3', '4', '6', '7', '8'].includes(type)) {
+-      return is_verify && extra
+-    } else {
+-      return is_verify
+-    }
+-  }
+-
+-  function toNext() {
+-    const {type, extra} = store.record;
+-    if (!Number(extra) > 0) {
+-      if (type === '1' && extra) return message.error('请输入正确的响应时间')
+-      if (type === '2' || type === '7') return message.error('请输入正确的端口号')
+-    }
+-    store.page += 1;
+-  }
+-
+-  function getStyle(t) {
+-    return t.includes(store.record.type) ? {} : {display: 'none'}
+-  }
+-
+-  const {name, desc, type, targets, extra, group} = store.record;
+-  return (
+-    <Form labelCol={{span: 6}} wrapperCol={{span: 14}}>
+-      <Form.Item required label="监控分组" style={{marginBottom: 0}}>
+-        <Form.Item style={{display: 'inline-block', width: 'calc(75%)', marginRight: 8}}>
+-          <Select value={group} placeholder="请选择监控分组" onChange={v => store.record.group = v}>
+-            {store.groups.map(item => (
+-              <Select.Option value={item} key={item}>{item}</Select.Option>
+-            ))}
+-          </Select>
+-        </Form.Item>
+-        <Form.Item style={{display: 'inline-block', width: 'calc(25%-8px)'}}>
+-          <Button type="link" onClick={handleAddGroup}>添加分组</Button>
+-        </Form.Item>
+-      </Form.Item>
+-      <Form.Item label="监控类型" tooltip={helpMap[type]}>
+-        <Select placeholder="请选择监控类型" value={type} onChange={handleChangeType}>
+-          <Select.Option value="1">站点检测</Select.Option>
+-          <Select.Option value="2">端口检测</Select.Option>
+-          <Select.Option value="5">Ping检测</Select.Option>
+-          <Select.Option value="3">进程检测</Select.Option>
+-          <Select.Option value="4">自定义脚本</Select.Option>
+-          <Select.Option value="6">Docker检测</Select.Option>
+-          <Select.Option value="7">数据库检测</Select.Option>
+-          <Select.Option value="8">日志监控</Select.Option>
+-        </Select>
+-      </Form.Item>
+-      <Form.Item required label="监控名称">
+-        <Input value={name} onChange={e => store.record.name = e.target.value} placeholder="请输入监控名称"/>
+-      </Form.Item>
+-      <Form.Item required label="监控地址" style={getStyle(['1'])}>
+-        <Select
+-          mode="tags"
+-          value={targets}
+-          tokenSeparators={[',', ' ']}
+-          onChange={v => store.record.targets = v}
+-          placeholder="http(s)://开头，支持多个地址，每输入完成一个后按回车确认"
+-          notFoundContent={null}/>
+-      </Form.Item>
+-      <Form.Item required label="监控地址" style={getStyle(['2', '5', '7'])}>
+-        <Select
+-          mode="tags"
+-          value={targets}
+-          tokenSeparators={[',', ' ']}
+-          onChange={v => store.record.targets = v}
+-          placeholder="IP或域名，支持多个地址，每输入完成一个后按回车确认"
+-          notFoundContent={null}/>
+-      </Form.Item>
+-      <Form.Item required label="监控主机" style={getStyle(['3', '4', '6', '8'])}>
+-        <HostSelector value={targets} onChange={ids => store.record.targets = ids}/>
+-      </Form.Item>
+-      <Form.Item label="响应时间" style={getStyle(['1'])}>
+-        <Input suffix="ms" value={extra} placeholder="最长响应时间（毫秒），不设置则默认10秒超时"
+-               onChange={e => store.record.extra = e.target.value}/>
+-      </Form.Item>
+-      <Form.Item required label="检测端口" style={getStyle(['2'])}>
+-        <Input value={extra} placeholder="请输入端口号" onChange={e => store.record.extra = e.target.value}/>
+-      </Form.Item>
+-      <Form.Item required label="进程名称" extra="执行 ps -ef 看到的进程名称。" style={getStyle(['3'])}>
+-        <Input value={extra} placeholder="请输入进程名称" onChange={e => store.record.extra = e.target.value}/>
+-      </Form.Item>
+-      <Form.Item required label="容器名称" extra="执行 docker ps 看到的容器名称或ID。" style={getStyle(['6'])}>
+-        <Input value={extra} placeholder="请输入容器名称" onChange={e => store.record.extra = e.target.value}/>
+-      </Form.Item>
+-      <Form.Item required label="数据库类型/端口" style={getStyle(['7'])}>
+-        <Select
+-          placeholder="选择常见数据库类型自动填充默认端口（可编辑）"
+-          onChange={v => store.record.extra = String(DB_PORTS[v])}
+-          style={{marginBottom: 8}}
+-        >
+-          {Object.entries(DB_PORTS).map(([k, v]) => <Select.Option key={k} value={k}>{k}（默认端口 {v}）</Select.Option>)}
+-        </Select>
+-        <Input value={extra} placeholder="端口号" onChange={e => store.record.extra = e.target.value}/>
+-      </Form.Item>
+-      <Form.Item required label="日志路径" style={getStyle(['8'])}>
+-        <Input
+-          value={(extra || '').split('||')[0] || ''}
+-          placeholder="例如：/var/log/nginx/error.log"
+-          onChange={e => store.record.extra = `${e.target.value}||${(extra || '').split('||')[1] || ''}`}/>
+-      </Form.Item>
+-      <Form.Item required label="告警关键字" extra="检测日志最近200行中是否出现该关键字（如 ERROR、Exception），出现即判定为异常。" style={getStyle(['8'])}>
+-        <Input
+-          value={(extra || '').split('||')[1] || ''}
+-          placeholder="例如：ERROR"
+-          onChange={e => store.record.extra = `${(extra || '').split('||')[0] || ''}||${e.target.value}`}/>
+-      </Form.Item>
+-      <Form.Item
+-        required
+-        label="脚本内容"
+-        style={getStyle(['4'])}
+-        extra={<LinkButton onClick={() => setShowTmp(true)}>从模板添加</LinkButton>}>
+-        <ACEditor
+-          mode="sh"
+-          value={extra || ''}
+-          width="100%"
+-          height="200px"
+-          onChange={e => store.record.extra = cleanCommand(e)}/>
+-      </Form.Item>
+-      <Form.Item label="备注信息">
+-        <Input.TextArea value={desc} onChange={e => store.record.desc = e.target.value} placeholder="请输入备注信息"/>
+-      </Form.Item>
+-
+-      <Form.Item wrapperCol={{span: 14, offset: 6}} style={{marginTop: 12}}>
+-        <Button disabled={!canNext()} type="primary" onClick={toNext}>下一步</Button>
+-        <Button disabled={!canNext()} type="link" loading={loading} onClick={handleTest}>执行测试</Button>
+-        <span style={{color: '#888', fontSize: 12}}>Tips: 仅测试第一个监控地址</span>
+-      </Form.Item>
+-      {showTmp && <TemplateSelector onOk={({body}) => store.record.extra = body} onCancel={() => setShowTmp(false)}/>}
+-    </Form>
+-  )
+-})
+\ No newline at end of file
+diff --git a/spug_web/src/pages/monitor/Step2.js b/spug_web/src/pages/monitor/Step2.js
+deleted file mode 100644
+index 44f9ab0..0000000
+--- a/spug_web/src/pages/monitor/Step2.js
++++ /dev/null
+@@ -1,114 +0,0 @@
+-/**
+- * Copyright (c) OpenSpug Organization. https://github.com/openspug/spug
+- * Copyright (c) <spug.dev@gmail.com>
+- * Released under the AGPL-3.0 License.
+- */
+-import React, { useState, useEffect } from 'react';
+-import { Link } from 'react-router-dom';
+-import { observer } from 'mobx-react';
+-import { Form, Select, Radio, Transfer, Checkbox, Button, message } from 'antd';
+-import { http } from 'libs';
+-import groupStore from '../alarm/group/store';
+-import store from './store';
+-import lds from 'lodash';
+-
+-const modeOptions = [
+-  {label: '微信', 'value': '1'},
+-  {label: '短信', 'value': '2'},
+-  {label: '电话', 'value': '6'},
+-  {label: '邮件', 'value': '4'},
+-  {label: '钉钉', 'value': '3'},
+-  {label: '企业微信', 'value': '5'},
+-  {label: '飞书', 'value': '7'},
+-];
+-
+-export default observer(function () {
+-  const [form] = Form.useForm();
+-  const [loading, setLoading] = useState(false);
+-
+-  useEffect(() => {
+-    const {type, addr} = store.record;
+-    if (type === '1' && addr) {
+-      store.record.sitePrefix = addr.startsWith('http://') ? 'http://' : 'https://';
+-      store.record.domain = store.record.addr.replace(store.record.sitePrefix, '')
+-    }
+-  }, [])
+-
+-  function handleSubmit() {
+-    setLoading(true)
+-    const formData = form.getFieldsValue();
+-    Object.assign(formData, lds.pick(store.record, ['id', 'name', 'desc', 'targets', 'extra', 'type', 'group']))
+-    formData['id'] = store.record.id;
+-    http.post('/api/monitor/', formData)
+-      .then(() => {
+-        message.success('操作成功');
+-        store.record = {};
+-        store.formVisible = false;
+-        store.fetchRecords();
+-        store.fetchOverviews()
+-      }, () => setLoading(false))
+-  }
+-
+-  function canNext() {
+-    const {notify_grp, notify_mode} = form.getFieldsValue();
+-    return notify_grp && notify_grp.length && notify_mode && notify_mode.length;
+-  }
+-
+-  const info = store.record;
+-  return (
+-    <Form form={form} labelCol={{span: 6}} wrapperCol={{span: 14}}>
+-      <Form.Item name="rate" initialValue={info.rate || 5} label="监控频率" tooltip="每隔N分钟检测一次">
+-        <Radio.Group>
+-          <Radio value={1}>1分钟</Radio>
+-          <Radio value={5}>5分钟</Radio>
+-          <Radio value={15}>15分钟</Radio>
+-          <Radio value={30}>30分钟</Radio>
+-          <Radio value={60}>60分钟</Radio>
+-        </Radio.Group>
+-      </Form.Item>
+-      <Form.Item name="threshold" initialValue={info.threshold || 3} label="报警阈值" tooltip="连续N次检测失败，则发送告警">
+-        <Radio.Group>
+-          <Radio value={1}>1次</Radio>
+-          <Radio value={2}>2次</Radio>
+-          <Radio value={3}>3次</Radio>
+-          <Radio value={4}>4次</Radio>
+-          <Radio value={5}>5次</Radio>
+-        </Radio.Group>
+-      </Form.Item>
+-      <Form.Item required name="notify_grp" valuePropName="targetKeys" initialValue={info.notify_grp} label="报警联系人组"
+-                 extra={<>去创建 <Link to="/alarm/contact">报警联系人</Link> 和 <Link to="/alarm/group">联系人组</Link>。</>}>
+-        <Transfer
+-          lazy={false}
+-          rowKey={item => item.id}
+-          titles={['已有联系组', '已选联系组']}
+-          listStyle={{width: 199}}
+-          dataSource={groupStore.records}
+-          render={item => item.name}/>
+-      </Form.Item>
+-      <Form.Item required name="notify_mode" initialValue={info.notify_mode} label="报警方式">
+-        <Checkbox.Group options={modeOptions}/>
+-      </Form.Item>
+-      <Form.Item name="quiet" initialValue={info.quiet || 24 * 60} label="通道沉默" extra="相同的告警信息，沉默期内只发送一次。">
+-        <Select placeholder="请选择">
+-          <Select.Option value={5}>5分钟</Select.Option>
+-          <Select.Option value={10}>10分钟</Select.Option>
+-          <Select.Option value={15}>15分钟</Select.Option>
+-          <Select.Option value={30}>30分钟</Select.Option>
+-          <Select.Option value={60}>60分钟</Select.Option>
+-          <Select.Option value={3 * 60}>3小时</Select.Option>
+-          <Select.Option value={6 * 60}>6小时</Select.Option>
+-          <Select.Option value={12 * 60}>12小时</Select.Option>
+-          <Select.Option value={24 * 60}>24小时</Select.Option>
+-        </Select>
+-      </Form.Item>
+-      <Form.Item shouldUpdate wrapperCol={{span: 14, offset: 6}} style={{marginTop: 12}}>
+-        {() => (
+-          <React.Fragment>
+-            <Button disabled={!canNext()} loading={loading} type="primary" onClick={handleSubmit}>提交</Button>
+-            <Button style={{marginLeft: 20}} onClick={() => store.page -= 1}>上一步</Button>
+-          </React.Fragment>
+-        )}
+-      </Form.Item>
+-    </Form>
+-  )
+-})
+\ No newline at end of file
+diff --git a/spug_web/src/pages/monitor/Table.js b/spug_web/src/pages/monitor/Table.js
+deleted file mode 100644
+index fc6f0d3..0000000
+--- a/spug_web/src/pages/monitor/Table.js
++++ /dev/null
+@@ -1,105 +0,0 @@
+-/**
+- * Copyright (c) OpenSpug Organization. https://github.com/openspug/spug
+- * Copyright (c) <spug.dev@gmail.com>
+- * Released under the AGPL-3.0 License.
+- */
+-import React from 'react';
+-import { observer } from 'mobx-react';
+-import { Table, Modal, Radio, Tag, message } from 'antd';
+-import { PlusOutlined } from '@ant-design/icons';
+-import { Action, AuthButton, TableCard } from 'components';
+-import { http, hasPermission } from 'libs';
+-import store from './store';
+-
+-@observer
+-class ComTable extends React.Component {
+-  componentDidMount() {
+-    store.fetchRecords();
+-  }
+-
+-  handleActive = (text) => {
+-    Modal.confirm({
+-      title: '操作确认',
+-      content: `确定要${text['is_active'] ? '禁用' : '启用'}【${text['name']}】?`,
+-      onOk: () => {
+-        return http.patch(`/api/monitor/`, {id: text.id, is_active: !text['is_active']})
+-          .then(() => {
+-            message.success('操作成功');
+-            store.fetchRecords()
+-          })
+-      }
+-    })
+-  };
+-
+-  handleDelete = (text) => {
+-    Modal.confirm({
+-      title: '删除确认',
+-      content: `确定要删除【${text['name']}】?`,
+-      onOk: () => {
+-        return http.delete('/api/monitor/', {params: {id: text.id}})
+-          .then(() => {
+-            message.success('删除成功');
+-            store.fetchRecords()
+-          })
+-      }
+-    })
+-  };
+-
+-  render() {
+-    return (
+-      <TableCard
+-        tKey="mi"
+-        rowKey="id"
+-        title="监控任务"
+-        loading={store.isFetching}
+-        dataSource={store.dataSource}
+-        onReload={store.fetchRecords}
+-        actions={[
+-          <AuthButton
+-            auth="monitor.monitor.add"
+-            type="primary"
+-            icon={<PlusOutlined/>}
+-            onClick={() => store.showForm()}>新建</AuthButton>,
+-          <Radio.Group value={store.f_active} onChange={e => store.f_active = e.target.value}>
+-            <Radio.Button value="">全部</Radio.Button>
+-            <Radio.Button value="1">已激活</Radio.Button>
+-            <Radio.Button value="0">未激活</Radio.Button>
+-          </Radio.Group>
+-        ]}
+-        pagination={{
+-          showSizeChanger: true,
+-          showLessItems: true,
+-          showTotal: total => `共 ${total} 条`,
+-          pageSizeOptions: ['10', '20', '50', '100']
+-        }}>
+-        <Table.Column title="监控分组" dataIndex="group"/>
+-        <Table.Column title="监控名称" dataIndex="name"/>
+-        <Table.Column title="类型" dataIndex="type_alias"/>
+-        <Table.Column title="频率" dataIndex="rate" render={value => `${value}分钟`}/>
+-        <Table.Column title="状态" render={info => {
+-          if (info.is_active) {
+-            return <Tag color="blue">已激活</Tag>
+-          } else {
+-            return <Tag color="red">未激活</Tag>
+-          }
+-        }}/>
+-        <Table.Column title="更新于" dataIndex="latest_run_time_alias"
+-                      sorter={(a, b) => a.latest_run_time.localeCompare(b.latest_run_time)}/>
+-        <Table.Column hide title="描述" dataIndex="desc"/>
+-        {hasPermission('monitor.monitor.edit|monitor.monitor.del') && (
+-          <Table.Column width={180} title="操作" render={info => (
+-            <Action>
+-              <Action.Button auth="monitor.monitor.edit"
+-                             onClick={() => this.handleActive(info)}>{info['is_active'] ? '禁用' : '启用'}</Action.Button>
+-              <Action.Button auth="monitor.monitor.edit" onClick={() => store.showForm(info)}>编辑</Action.Button>
+-              <Action.Button danger auth="monitor.monitor.del"
+-                             onClick={() => this.handleDelete(info)}>删除</Action.Button>
+-            </Action>
+-          )}/>
+-        )}
+-      </TableCard>
+-    )
+-  }
+-}
+-
+-export default ComTable
+diff --git a/spug_web/src/pages/monitor/index.js b/spug_web/src/pages/monitor/index.js
+deleted file mode 100644
+index 79fa3a8..0000000
+--- a/spug_web/src/pages/monitor/index.js
++++ /dev/null
+@@ -1,34 +0,0 @@
+-/**
+- * Copyright (c) OpenSpug Organization. https://github.com/openspug/spug
+- * Released under the AGPL-3.0 License.
+- */
+-import React from 'react';
+-import { observer } from 'mobx-react';
+-import { Tabs } from 'antd';
+-import { AuthDiv, Breadcrumb } from 'components';
+-import Overview from '../netmon/Overview';
+-import ComTable from './Table';
+-import ComForm from './Form';
+-import MonitorCard from './MonitorCard';
+-import store from './store';
+-
+-export default observer(function () {
+-  return (
+-    <AuthDiv auth="monitor.monitor.view">
+-      <Breadcrumb>
+-        <Breadcrumb.Item>首页</Breadcrumb.Item>
+-        <Breadcrumb.Item>监控中心</Breadcrumb.Item>
+-      </Breadcrumb>
+-      <Tabs defaultActiveKey="dashboard" type="card">
+-        <Tabs.TabPane tab="总览大屏" key="dashboard">
+-          <Overview/>
+-        </Tabs.TabPane>
+-        <Tabs.TabPane tab="监控任务" key="tasks">
+-          <MonitorCard/>
+-          <ComTable/>
+-        </Tabs.TabPane>
+-      </Tabs>
+-      {store.formVisible && <ComForm/>}
+-    </AuthDiv>
+-  )
+-})
+diff --git a/spug_web/src/pages/monitor/index.module.less b/spug_web/src/pages/monitor/index.module.less
+deleted file mode 100644
+index 81f01d6..0000000
+--- a/spug_web/src/pages/monitor/index.module.less
++++ /dev/null
+@@ -1,56 +0,0 @@
+-.steps {
+-    width: 520px;
+-    margin: 0 auto 30px;
+-}
+-
+-.card {
+-    display: flex;
+-    justify-content: center;
+-    align-items: center;
+-    width: 16px;
+-    height: 16px;
+-    font-size: 12px;
+-    color: #fff;
+-    border-radius: 2px;
+-}
+-
+-.header {
+-    display: flex;
+-    justify-content: flex-end;
+-    align-items: center;
+-    margin-bottom: 12px;
+-    margin-top: -6px;
+-
+-    .item {
+-        display: flex;
+-        justify-content: center;
+-        align-items: center;
+-        min-width: 26px;
+-        height: 20px;
+-        margin-left: 12px;
+-        border-radius: 10px;
+-        padding: 0 8px;
+-        color: #fff;
+-        font-weight: bold;
+-        cursor: pointer;
+-    }
+-
+-    .autoLoad {
+-        margin-left: 24px;
+-        font-size: 18px;
+-        color: #999999;
+-    }
+-}
+-
+-.notMatch {
+-    display: flex;
+-    justify-content: center;
+-    align-items: center;
+-    color: #999;
+-
+-    :global(.anticon) {
+-        font-size: 18px;
+-        margin-right: 8px;
+-    }
+-}
+-
+diff --git a/spug_web/src/pages/monitor/store.js b/spug_web/src/pages/monitor/store.js
+deleted file mode 100644
+index 79c7ec9..0000000
+--- a/spug_web/src/pages/monitor/store.js
++++ /dev/null
+@@ -1,85 +0,0 @@
+-/**
+- * Copyright (c) OpenSpug Organization. https://github.com/openspug/spug
+- * Copyright (c) <spug.dev@gmail.com>
+- * Released under the AGPL-3.0 License.
+- */
+-import { observable, computed } from 'mobx';
+-import { http, includes } from 'libs';
+-import moment from 'moment';
+-import lds from 'lodash';
+-
+-class Store {
+-  autoReload = null;
+-  @observable records = [];
+-  @observable record = {};
+-  @observable types = [];
+-  @observable groups = [];
+-  @observable overviews = [];
+-  @observable page = 0;
+-  @observable isFetching = false;
+-  @observable formVisible = false;
+-  @observable ovFetching = false;
+-
+-  @observable f_name;
+-  @observable f_type;
+-  @observable f_active = '';
+-  @observable f_group;
+-
+-  @computed get dataSource() {
+-    let records = this.records;
+-    if (this.f_active) records = records.filter(x => x.is_active === (this.f_active === '1'));
+-    if (this.f_name) records = records.filter(x => includes(x.name, this.f_name));
+-    if (this.f_type) records = records.filter(x => x.type_alias === this.f_type);
+-    if (this.f_group) records = records.filter(x => x.group === this.f_group);
+-    return records
+-  }
+-
+-  @computed get ovDataSource() {
+-    let records = this.overviews;
+-    if (this.f_type) records = records.filter(x => x.type === this.f_type);
+-    if (this.f_group) records = records.filter(x => x.group === this.f_group);
+-    if (this.f_name) records = records.filter(x => includes(x.name, this.f_name));
+-    return records
+-  }
+-
+-  fetchRecords = () => {
+-    this.isFetching = true;
+-    http.get('/api/monitor/')
+-      .then(({groups, detections}) => {
+-        const tmp = new Set();
+-        detections.map(item => {
+-          tmp.add(item['type_alias']);
+-          const value = item['latest_run_time'];
+-          item['latest_run_time_alias'] = value ? moment(value).fromNow() : null;
+-          return null
+-        });
+-        this.types = Array.from(tmp);
+-        this.records = detections;
+-        this.groups = groups;
+-      })
+-      .finally(() => this.isFetching = false)
+-  };
+-
+-  fetchOverviews = () => {
+-    if (this.autoReload === false) return
+-    this.ovFetching = true;
+-    return http.get('/api/monitor/overview/')
+-      .then(res => this.overviews = res)
+-      .finally(() => {
+-        this.ovFetching = false;
+-        if (this.autoReload) setTimeout(this.fetchOverviews, 5000)
+-      })
+-  }
+-
+-  showForm = (info) => {
+-    if (info) {
+-      this.record = lds.cloneDeep(info)
+-    } else if (this.record.id || !this.record.type) {
+-      this.record = {type: '1', targets: []}
+-    }
+-    this.page = 0;
+-    this.formVisible = true;
+-  }
+-}
+-
+-export default new Store()
+diff --git a/spug_web/src/pages/netmon/DeviceDetail.js b/spug_web/src/pages/netmon/DeviceDetail.js
+index 1c1d804..4335a2c 100644
+--- a/spug_web/src/pages/netmon/DeviceDetail.js
++++ b/spug_web/src/pages/netmon/DeviceDetail.js
+@@ -57,6 +57,14 @@ export default observer(function DeviceDetail() {
+   const device = store.device;
+   if (!device || !device.id) return null;
+ 
++  let lastMessage = '';
++  if (device.is_check_type) {
++    try {
++      const lv = typeof device.last_value === 'string' ? JSON.parse(device.last_value || '{}') : (device.last_value || {});
++      lastMessage = lv.message || '';
++    } catch (e) { /* ignore */ }
++  }
++
+   return (
+     <Drawer
+       title={`${device.name}（${device.ip}）`}
+@@ -69,13 +77,23 @@ export default observer(function DeviceDetail() {
+           <Tag color={STATUS_COLOR[device.status]}>{device.status_alias || device.status}</Tag>
+         </Descriptions.Item>
+         <Descriptions.Item label="分类">{device.category_alias || device.category}</Descriptions.Item>
+-        <Descriptions.Item label="采集方式">{device.monitor_type_alias || device.monitor_type}</Descriptions.Item>
+-        <Descriptions.Item label="采集周期">{device.rate}s</Descriptions.Item>
++        <Descriptions.Item label="监控方式">{device.monitor_type_alias || device.monitor_type}</Descriptions.Item>
++        <Descriptions.Item label="检测/采集周期">{device.rate}s</Descriptions.Item>
+         <Descriptions.Item label="最近检测时间" span={2}>{device.latest_check_at || '-'}</Descriptions.Item>
++        {device.is_check_type && (
++          <Descriptions.Item label="最近检测结果" span={2}>{lastMessage || '-'}</Descriptions.Item>
++        )}
+       </Descriptions>
+-      <Row gutter={16}>
+-        {METRICS.map(m => <MetricChart key={m.key} deviceId={device.id} metric={m}/>)}
+-      </Row>
++      {device.is_check_type ? (
++        <Empty
++          description="该监控项为可用性检测类型（是/否正常），不产生数值指标趋势图，告警历史请前往「报警中心」查看。"
++          style={{ padding: '40px 0' }}
++        />
++      ) : (
++        <Row gutter={16}>
++          {METRICS.map(m => <MetricChart key={m.key} deviceId={device.id} metric={m}/>)}
++        </Row>
++      )}
+     </Drawer>
+   )
+ })
+diff --git a/spug_web/src/pages/netmon/Devices.js b/spug_web/src/pages/netmon/Devices.js
+index ef662c0..dfaa008 100644
+--- a/spug_web/src/pages/netmon/Devices.js
++++ b/spug_web/src/pages/netmon/Devices.js
+@@ -5,27 +5,71 @@
+  */
+ import React, { useEffect, useState } from 'react';
+ import { observer } from 'mobx-react';
+-import { Table, Tag, Space, Select, Input, Form, Modal, InputNumber, message, Upload, Button, Alert, TreeSelect } from 'antd';
++import {
++  Table, Tag, Space, Select, Input, Form, Modal, InputNumber, message, Upload, Button, Alert, TreeSelect,
++  Radio, Checkbox, Transfer, Divider
++} from 'antd';
+ import { UploadOutlined, ThunderboltOutlined } from '@ant-design/icons';
++import { Link } from 'react-router-dom';
+ import { AuthButton, LinkButton, ACEditor } from 'components';
+ import { http, cleanCommand } from 'libs';
+ import store from './store';
++import hostStore from 'pages/host/store';
++import groupStore from '../alarm/group/store';
+ import TemplateSelector from '../exec/task/TemplateSelector';
+ 
+ const STATUS_COLOR = { online: 'green', warning: 'orange', critical: 'red', offline: 'default', unknown: 'default' };
+ 
++// 指标采集类型：写入 MetricRecord，走 AlertRule / 动态基线做异常检测
++const METRIC_TYPE_OPTIONS = [
++  ['ping', 'Ping探测（时延/丢包）'],
++  ['snmp', 'SNMP采集（网络设备CPU/内存/流量）'],
++  ['agent', 'Agent采集（复用主机SSH凭据）'],
++  ['script', '自定义采集脚本（数值型，通过SSH执行）'],
++];
++// 可用性检测类型：合并自原"监控中心"模块，走连续失败阈值 + 静默期告警
++const CHECK_TYPE_OPTIONS = [
++  ['http', 'HTTP/站点检测'],
++  ['port', '端口检测'],
++  ['database', '数据库端口检测'],
++  ['ping_check', 'Ping可用性检测（阈值告警）'],
++  ['process', '进程检测（需绑定主机）'],
++  ['docker', 'Docker容器检测（需绑定主机）'],
++  ['shell', '命令检测/退出码（需绑定主机）'],
++  ['log', '日志关键字监控（需绑定主机）'],
++];
++const CHECK_TYPES = CHECK_TYPE_OPTIONS.map(x => x[0]);
++const HOST_REQUIRED_TYPES = ['process', 'docker', 'shell', 'log'];
++
++const NOTIFY_MODE_OPTIONS = [
++  { label: '微信', value: '1' },
++  { label: '短信', value: '2' },
++  { label: '钉钉', value: '3' },
++  { label: '邮件', value: '4' },
++  { label: '企业微信', value: '5' },
++  { label: '电话', value: '6' },
++  { label: '飞书', value: '7' },
++];
++
+ export default observer(function Devices() {
+   const [groupId, setGroupId] = useState(undefined);
+   const [selectedKeys, setSelectedKeys] = useState([]);
+   const [importing, setImporting] = useState(false);
+ 
+   useEffect(() => { store.fetchDevices(groupId) }, [groupId]);
++  useEffect(() => {
++    if (groupStore.records.length === 0) groupStore.fetchRecords();
++    if (hostStore.initial) { hostStore.initial() } else if (hostStore.fetchRecords) { hostStore.fetchRecords() }
++  }, []);
+ 
+   const columns = [
+     { title: '设备名称', dataIndex: 'name', render: (v, r) => <a onClick={() => store.showDetail(r)}>{v}</a> },
+-    { title: 'IP地址', dataIndex: 'ip' },
++    { title: 'IP地址/目标', dataIndex: 'ip' },
+     { title: '分类', dataIndex: 'category_alias' },
+-    { title: '采集方式', dataIndex: 'monitor_type_alias' },
++    {
++      title: '监控方式', dataIndex: 'monitor_type_alias',
++      render: (v, r) => <Tag color={r.is_check_type ? 'blue' : 'purple'}>{v}</Tag>
++    },
+     { title: '状态', dataIndex: 'status_alias', render: (v, r) => <Tag color={STATUS_COLOR[r.status]}>{v}</Tag> },
+     { title: '最近检测', dataIndex: 'latest_check_at' },
+     {
+@@ -75,12 +119,12 @@ export default observer(function Devices() {
+     <div>
+       <Alert
+         type="info" showIcon closable style={{ marginBottom: 16 }}
+-        message="提示：可点击「批量导入」使用 CSV 快速录入大批量设备（表头：name,ip,category,monitor_type,group_id），或前往「自动发现」扫描网段自动识别。"
++        message="提示：本页面已统一原「监控中心」与「IT资源监控」两套功能——网络设备指标采集、站点/端口/进程/Docker/日志等可用性检测、告警联系组与通知渠道，现在都在这一处维护，不再有两套互不相通的数据。可点击「批量导入」使用 CSV 快速录入大批量设备，或前往「自动发现」扫描网段自动识别。"
+       />
+       <Space style={{ marginBottom: 16 }}>
+         <TreeSelect allowClear style={{ width: 220 }} placeholder="按分组筛选" value={groupId} onChange={setGroupId}
+           treeData={store.treeData} treeNodeFilterProp="title" showSearch treeDefaultExpandAll/>
+-        <AuthButton auth="netmon.device.add" type="primary" onClick={() => store.showForm()}>新建设备</AuthButton>
++        <AuthButton auth="netmon.device.add" type="primary" onClick={() => store.showForm()}>新建监控项</AuthButton>
+         <Upload accept=".csv" showUploadList={false} beforeUpload={handleImportCsv}>
+           <AuthButton auth="netmon.device.add" icon={<UploadOutlined/>} loading={importing}>批量导入(CSV)</AuthButton>
+         </Upload>
+@@ -96,17 +140,57 @@ export default observer(function Devices() {
+   )
+ })
+ 
++function parseExtra(raw) {
++  if (!raw) return {};
++  try {
++    const data = JSON.parse(raw);
++    return typeof data === 'object' && data !== null ? data : {};
++  } catch (e) {
++    return {};
++  }
++}
++
++function buildExtra(monitorType, values) {
++  switch (monitorType) {
++    case 'http':
++      return JSON.stringify({ url: values.chk_url, timeout_limit_ms: values.chk_timeout_limit_ms || undefined });
++    case 'port':
++    case 'database':
++      return JSON.stringify({ port: values.chk_port });
++    case 'process':
++      return JSON.stringify({ keyword: values.chk_keyword });
++    case 'docker':
++      return JSON.stringify({ container: values.chk_container });
++    case 'log':
++      return JSON.stringify({ path: values.chk_log_path, keyword: values.chk_log_keyword, tail_lines: values.chk_log_tail_lines || 200 });
++    case 'shell':
++      return values.chk_script || '';
++    case 'script':
++      return values.extra || '';
++    default:
++      return values.extra || '';
++  }
++}
++
+ function DeviceForm({ groupId }) {
+   const [form] = Form.useForm();
+   const [saving, setSaving] = useState(false);
+   const [testing, setTesting] = useState(false);
+   const [showTmp, setShowTmp] = useState(false);
+   const record = store.device;
++  const parsedExtra = parseExtra(record.extra);
+ 
+   function handleSubmit() {
+     form.validateFields().then(values => {
+       setSaving(true);
+-      const data = { ...record, ...values };
++      const extra = buildExtra(values.monitor_type, values);
++      const data = {
++        ...record, ...values, extra,
++        notify_grp: values.notify_grp || [],
++        notify_mode: values.notify_mode || [],
++      };
++      // 这些是仅用于表单交互的临时字段，提交前清理掉，避免污染后端参数
++      Object.keys(data).forEach(k => { if (k.startsWith('chk_')) delete data[k] });
+       http.post('/api/netmon/device/', data)
+         .then(() => { message.success('保存成功'); store.formVisible = false; store.fetchDevices(groupId) })
+         .finally(() => setSaving(false))
+@@ -114,14 +198,15 @@ function DeviceForm({ groupId }) {
+   }
+ 
+   function handleTest() {
+-    form.validateFields(['ip', 'monitor_type', 'snmp_community', 'snmp_port']).then(values => {
++    form.validateFields().then(values => {
+       setTesting(true);
+-      store.testConnectivity({ ...record, ...values })
++      const extra = buildExtra(values.monitor_type, values);
++      store.testConnectivity({ ...record, ...values, extra })
+         .then(({ success, metrics, message: msg }) => {
+           if (success) {
+-            Modal.success({ title: '连通性测试成功', content: `采集到指标：${JSON.stringify(metrics)}` });
++            Modal.success({ title: '连通性/可用性测试成功', content: metrics ? `采集到指标：${JSON.stringify(metrics)}` : msg });
+           } else {
+-            Modal.error({ title: '连通性测试失败', content: msg });
++            Modal.error({ title: '连通性/可用性测试失败', content: msg });
+           }
+         })
+         .finally(() => setTesting(false));
+@@ -130,25 +215,26 @@ function DeviceForm({ groupId }) {
+ 
+   return (
+     <Modal
+-      visible destroyOnClose title={record.id ? '编辑设备' : '新建设备'}
++      visible destroyOnClose width={640} title={record.id ? '编辑监控项' : '新建监控项'}
+       confirmLoading={saving} onOk={handleSubmit}
+       onCancel={() => store.formVisible = false}
+     >
+-      <Form form={form} layout="vertical" initialValues={record}>
+-        <Form.Item name="name" label="设备名称" rules={[{ required: true, message: '请输入设备名称' }]}>
+-          <Input placeholder="例如：核心交换机-01"/>
+-        </Form.Item>
+-        <Form.Item name="ip" label="IP地址" rules={[{ required: true, message: '请输入IP地址' }]}>
+-          <Input placeholder="例如：192.168.1.1"/>
+-        </Form.Item>
+-        <Form.Item name="category" label="设备分类">
+-          <Select>
+-            {[
+-              ['server', '服务器'], ['switch', '交换机'], ['router', '路由器'], ['firewall', '防火墙'],
+-              ['load_balancer', '负载均衡'], ['storage', '存储设备'], ['database', '数据库'],
+-              ['middleware', '中间件'], ['application', '业务应用'], ['other', '其他'],
+-            ].map(([v, l]) => <Select.Option key={v} value={v}>{l}</Select.Option>)}
+-          </Select>
++      <Form form={form} layout="vertical" initialValues={{
++        ...record,
++        chk_url: parsedExtra.url || (record.monitor_type === 'http' ? record.ip : undefined),
++        chk_timeout_limit_ms: parsedExtra.timeout_limit_ms,
++        chk_port: parsedExtra.port,
++        chk_keyword: parsedExtra.keyword,
++        chk_container: parsedExtra.container,
++        chk_log_path: parsedExtra.path,
++        chk_log_keyword: parsedExtra.keyword,
++        chk_log_tail_lines: parsedExtra.tail_lines || 200,
++        chk_script: record.monitor_type === 'shell' ? (record.extra || '') : undefined,
++        notify_grp: record.notify_grp || [],
++        notify_mode: record.notify_mode || [],
++      }}>
++        <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入名称' }]}>
++          <Input placeholder="例如：核心交换机-01 / 官网首页可用性"/>
+         </Form.Item>
+         <Form.Item name="group_id" label="所属分组">
+           <TreeSelect
+@@ -159,50 +245,178 @@ function DeviceForm({ groupId }) {
+             treeDefaultExpandAll
+             placeholder="请选择分组（与主机管理共享）"/>
+         </Form.Item>
+-        <Form.Item name="monitor_type" label="采集方式" rules={[{ required: true }]}>
++        <Form.Item name="category" label="设备分类" initialValue="server">
+           <Select>
+-            <Select.Option value="ping">Ping探测（时延/丢包）</Select.Option>
+-            <Select.Option value="snmp">SNMP采集（网络设备CPU/内存/流量）</Select.Option>
+-            <Select.Option value="agent">Agent采集（复用主机SSH凭据）</Select.Option>
+-            <Select.Option value="script">自定义脚本（通过SSH执行自定义脚本）</Select.Option>
++            {[
++              ['server', '服务器'], ['switch', '交换机'], ['router', '路由器'], ['firewall', '防火墙'],
++              ['load_balancer', '负载均衡'], ['storage', '存储设备'], ['database', '数据库'],
++              ['middleware', '中间件'], ['application', '业务应用'], ['other', '其他'],
++            ].map(([v, l]) => <Select.Option key={v} value={v}>{l}</Select.Option>)}
+           </Select>
+         </Form.Item>
+-        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.monitor_type !== cur.monitor_type}>
+-          {({ getFieldValue }) => getFieldValue('monitor_type') === 'snmp' && (
+-            <>
+-              <Form.Item name="snmp_community" label="SNMP团体字" initialValue="public">
+-                <Input/>
+-              </Form.Item>
+-              <Form.Item name="snmp_port" label="SNMP端口" initialValue={161}>
+-                <InputNumber style={{ width: '100%' }}/>
+-              </Form.Item>
+-            </>
+-          )}
++        <Form.Item name="monitor_type" label="监控方式" initialValue="ping" rules={[{ required: true }]}>
++          <Select>
++            <Select.OptGroup label="指标采集（数值趋势 + 动态基线异常检测）">
++              {METRIC_TYPE_OPTIONS.map(([v, l]) => <Select.Option key={v} value={v}>{l}</Select.Option>)}
++            </Select.OptGroup>
++            <Select.OptGroup label="可用性检测（是/否正常，连续失败达阈值告警）">
++              {CHECK_TYPE_OPTIONS.map(([v, l]) => <Select.Option key={v} value={v}>{l}</Select.Option>)}
++            </Select.OptGroup>
++          </Select>
+         </Form.Item>
+-        <Form.Item noStyle shouldUpdate={(prev, cur) => prev.monitor_type !== cur.monitor_type}>
+-          {({ getFieldValue }) => getFieldValue('monitor_type') === 'script' && (
+-            <Form.Item
+-              required
+-              label="脚本内容"
+-              extra={<LinkButton onClick={() => setShowTmp(true)}>从模板添加</LinkButton>}>
+-              <ACEditor
+-                mode="sh"
+-                value={record.extra || ''}
+-                width="100%"
+-                height="200px"
+-                onChange={e => { record.extra = cleanCommand(e); form.setFieldsValue({ extra: cleanCommand(e) }) }}/>
+-            </Form.Item>
+-          )}
++
++        <Form.Item noStyle shouldUpdate={(p, c) => p.monitor_type !== c.monitor_type}>
++          {({ getFieldValue }) => {
++            const mt = getFieldValue('monitor_type');
++            const needHost = HOST_REQUIRED_TYPES.includes(mt);
++            return (
++              <>
++                {/* IP地址：指标采集类型 与 端口/数据库/Ping可用性检测 都需要 */}
++                {['ping', 'snmp', 'agent', 'script', 'port', 'database', 'ping_check'].includes(mt) && (
++                  <Form.Item name="ip" label="IP地址" rules={[{ required: true, message: '请输入IP地址' }]}>
++                    <Input placeholder="例如：192.168.1.1"/>
++                  </Form.Item>
++                )}
++
++                {mt === 'snmp' && (
++                  <>
++                    <Form.Item name="snmp_community" label="SNMP团体字" initialValue="public">
++                      <Input/>
++                    </Form.Item>
++                    <Form.Item name="snmp_port" label="SNMP端口" initialValue={161}>
++                      <InputNumber style={{ width: '100%' }}/>
++                    </Form.Item>
++                  </>
++                )}
++
++                {mt === 'script' && (
++                  <Form.Item
++                    required
++                    label="采集脚本内容（需在标准输出打印 key=value 形式的数值指标）"
++                    extra={<LinkButton onClick={() => setShowTmp(true)}>从模板添加</LinkButton>}>
++                    <ACEditor
++                      mode="sh"
++                      value={record.monitor_type === 'script' ? (record.extra || '') : ''}
++                      width="100%"
++                      height="160px"
++                      onChange={e => { record.extra = cleanCommand(e); form.setFieldsValue({ extra: cleanCommand(e) }) }}/>
++                  </Form.Item>
++                )}
++
++                {mt === 'http' && (
++                  <>
++                    <Form.Item name="chk_url" label="检测URL" rules={[{ required: true, message: '请输入检测URL' }]}>
++                      <Input placeholder="例如：https://www.example.com"/>
++                    </Form.Item>
++                    <Form.Item name="chk_timeout_limit_ms" label="响应时间告警阈值(ms，选填)">
++                      <InputNumber min={1} style={{ width: '100%' }} placeholder="不填则只检测HTTP状态码是否正常"/>
++                    </Form.Item>
++                  </>
++                )}
++
++                {(mt === 'port' || mt === 'database') && (
++                  <Form.Item name="chk_port" label="检测端口" rules={[{ required: true, message: '请输入端口号' }]}>
++                    <InputNumber min={1} max={65535} style={{ width: '100%' }} placeholder="例如：3306"/>
++                  </Form.Item>
++                )}
++
++                {needHost && (
++                  <Form.Item name="host_id" label="绑定主机" rules={[{ required: true, message: '该检测方式需要通过SSH在目标主机上执行，请绑定主机' }]}>
++                    <Select showSearch placeholder="请选择主机" optionFilterProp="children">
++                      {(hostStore.rawRecords || []).map(item => (
++                        <Select.Option key={item.id} value={item.id}>{`${item.name}(${item.hostname})`}</Select.Option>
++                      ))}
++                    </Select>
++                  </Form.Item>
++                )}
++
++                {mt === 'process' && (
++                  <Form.Item name="chk_keyword" label="进程关键字" rules={[{ required: true, message: '请输入进程关键字' }]}>
++                    <Input placeholder="用于 ps -ef | grep 匹配，例如：nginx"/>
++                  </Form.Item>
++                )}
++
++                {mt === 'docker' && (
++                  <Form.Item name="chk_container" label="容器名称" rules={[{ required: true, message: '请输入容器名称' }]}>
++                    <Input placeholder="例如：spug_web"/>
++                  </Form.Item>
++                )}
++
++                {mt === 'shell' && (
++                  <Form.Item name="chk_script" label="检测脚本（退出码为0视为正常）" rules={[{ required: true, message: '请输入检测脚本' }]}>
++                    <ACEditor
++                      mode="sh"
++                      value={form.getFieldValue('chk_script') || ''}
++                      width="100%"
++                      height="140px"
++                      onChange={e => form.setFieldsValue({ chk_script: cleanCommand(e) })}/>
++                  </Form.Item>
++                )}
++
++                {mt === 'log' && (
++                  <>
++                    <Form.Item name="chk_log_path" label="日志文件路径" rules={[{ required: true, message: '请输入日志文件路径' }]}>
++                      <Input placeholder="例如：/var/log/app/error.log"/>
++                    </Form.Item>
++                    <Form.Item name="chk_log_keyword" label="告警关键字" rules={[{ required: true, message: '请输入关键字' }]}>
++                      <Input placeholder="例如：ERROR"/>
++                    </Form.Item>
++                    <Form.Item name="chk_log_tail_lines" label="检测最近N行" initialValue={200}>
++                      <InputNumber min={10} max={5000} style={{ width: '100%' }}/>
++                    </Form.Item>
++                  </>
++                )}
++
++                {CHECK_TYPES.includes(mt) && (
++                  <>
++                    <Divider orientation="left" plain>告警设置</Divider>
++                    <Form.Item name="threshold" label="报警阈值" initialValue={3} tooltip="连续N次检测失败，则发送告警">
++                      <Radio.Group>
++                        {[1, 2, 3, 4, 5].map(v => <Radio key={v} value={v}>{v}次</Radio>)}
++                      </Radio.Group>
++                    </Form.Item>
++                    <Form.Item name="notify_grp" label="报警联系组" valuePropName="targetKeys"
++                      extra={<>去创建 <Link to="/alarm/contact">报警联系人</Link> 和 <Link to="/alarm/group">联系人组</Link>。</>}>
++                      <Transfer
++                        lazy={false}
++                        rowKey={item => item.id}
++                        titles={['未选择', '已选择']}
++                        listStyle={{ width: 260, height: 200 }}
++                        dataSource={groupStore.records}
++                        render={item => item.name}/>
++                    </Form.Item>
++                    <Form.Item name="notify_mode" label="报警方式">
++                      <Checkbox.Group options={NOTIFY_MODE_OPTIONS}/>
++                    </Form.Item>
++                    <Form.Item name="quiet" label="告警静默期" initialValue={24 * 60} extra="相同的告警信息，静默期内只发送一次，避免刷屏">
++                      <Select style={{ width: '100%' }}>
++                        <Select.Option value={5}>5分钟</Select.Option>
++                        <Select.Option value={10}>10分钟</Select.Option>
++                        <Select.Option value={15}>15分钟</Select.Option>
++                        <Select.Option value={30}>30分钟</Select.Option>
++                        <Select.Option value={60}>60分钟</Select.Option>
++                        <Select.Option value={3 * 60}>3小时</Select.Option>
++                        <Select.Option value={6 * 60}>6小时</Select.Option>
++                        <Select.Option value={12 * 60}>12小时</Select.Option>
++                        <Select.Option value={24 * 60}>24小时</Select.Option>
++                      </Select>
++                    </Form.Item>
++                  </>
++                )}
++              </>
++            )
++          }}
+         </Form.Item>
+-        <Form.Item name="rate" label="采集周期(秒)" initialValue={60} rules={[{ required: true }]}>
++
++        <Form.Item name="rate" label="检测/采集周期(秒)" initialValue={60} rules={[{ required: true }]}>
+           <InputNumber min={10} style={{ width: '100%' }}/>
+         </Form.Item>
+         <Form.Item name="desc" label="备注">
+           <Input.TextArea rows={2}/>
+         </Form.Item>
+-        <Button icon={<ThunderboltOutlined/>} loading={testing} onClick={handleTest}>测试连通性</Button>
++        <Button icon={<ThunderboltOutlined/>} loading={testing} onClick={handleTest}>测试连通性/可用性</Button>
+       </Form>
+-      {showTmp && <TemplateSelector onOk={({body}) => { record.extra = body; form.setFieldsValue({ extra: body }) }} onCancel={() => setShowTmp(false)}/>}
++      {showTmp && <TemplateSelector onOk={({ body }) => { record.extra = body; form.setFieldsValue({ extra: body }) }} onCancel={() => setShowTmp(false)}/>}
+     </Modal>
+   )
+ }
+diff --git a/spug_web/src/pages/netmon/store.js b/spug_web/src/pages/netmon/store.js
+index 6542ca8..9ecb8da 100644
+--- a/spug_web/src/pages/netmon/store.js
++++ b/spug_web/src/pages/netmon/store.js
+@@ -103,7 +103,10 @@ class Store {
+   };
+ 
+   showForm = (info) => {
+-    this.device = info ? { ...info } : { category: 'server', monitor_type: 'ping', rate: 60, extra: '' };
++    this.device = info ? { ...info } : {
++      category: 'server', monitor_type: 'ping', rate: 60, extra: '',
++      threshold: 3, quiet: 24 * 60, notify_grp: [], notify_mode: [],
++    };
+     this.formVisible = true;
+   };
+ 
+diff --git a/spug_web/src/routes.js b/spug_web/src/routes.js
+index 2db32a6..0d664c7 100644
+--- a/spug_web/src/routes.js
++++ b/spug_web/src/routes.js
+@@ -13,7 +13,6 @@ import {
+   ScheduleOutlined,
+   DeploymentUnitOutlined,
+   MonitorOutlined,
+-  ApartmentOutlined,
+   GlobalOutlined,
+   AlertOutlined,
+   SettingOutlined
+@@ -33,7 +32,6 @@ import ConfigEnvironment from './pages/config/environment';
+ import ConfigService from './pages/config/service';
+ import ConfigApp from './pages/config/app';
+ import ConfigSetting from './pages/config/setting';
+-import MonitorIndex from './pages/monitor';
+ import NetmonIndex from './pages/netmon';
+ import IpamIndex from './pages/ipam';
+ import AlarmIndex from './pages/alarm/alarm';
+@@ -46,15 +44,15 @@ import SystemLogin from './pages/system/login';
+ import WelcomeIndex from './pages/welcome/index';
+ import WelcomeInfo from './pages/welcome/info';
+ 
++// 菜单编排说明（本次统一整理）：
++// 1. 工作台/仪表盘 —— 总览类页面放在最前
++// 2. 主机管理/IP地址管理/监控中心/报警中心 —— IT资源与可观测性相关功能放在一起，
++//    其中"监控中心"已合并原先并存的"监控中心(monitor)"与"IT资源监控(netmon)"两个重复入口，
++//    数据源、告警联系组、通知渠道全部统一，不再有两套互不相通的监控系统。
++// 3. 批量执行/应用发布/任务计划/配置中心 —— 发布运维类操作流程放在一起
++// 4. 系统管理 —— 固定放在最后，符合常见后台系统的编排习惯
+ export default [
+   {icon: <DesktopOutlined/>, title: '工作台', path: '/home', component: HomeIndex},
+-  {
+-    icon: <ApartmentOutlined/>,
+-    title: 'IT资源监控',
+-    auth: 'netmon.device.view',
+-    path: '/netmon',
+-    component: NetmonIndex
+-  },
+   {
+     icon: <DashboardOutlined/>,
+     title: '仪表盘',
+@@ -63,6 +61,27 @@ export default [
+     component: DashboardIndex
+   },
+   {icon: <CloudServerOutlined/>, title: '主机管理', auth: 'host.host.view', path: '/host', component: HostIndex},
++  {
++    icon: <GlobalOutlined/>,
++    title: 'IP地址管理',
++    auth: 'ipam.subnet.view',
++    path: '/ipam',
++    component: IpamIndex
++  },
++  {
++    icon: <MonitorOutlined/>,
++    title: '监控中心',
++    auth: 'netmon.device.view',
++    path: '/netmon',
++    component: NetmonIndex
++  },
++  {
++    icon: <AlertOutlined/>, title: '报警中心', auth: 'alarm.alarm.view|alarm.contact.view|alarm.group.view', child: [
++      {title: '报警历史', auth: 'alarm.alarm.view', path: '/alarm/alarm', component: AlarmIndex},
++      {title: '报警联系人', auth: 'alarm.contact.view', path: '/alarm/contact', component: AlarmContact},
++      {title: '报警联系组', auth: 'alarm.group.view', path: '/alarm/group', component: AlarmGroup},
++    ]
++  },
+   {
+     icon: <CodeOutlined/>, title: '批量执行', auth: 'exec.task.do|exec.template.view', child: [
+       {title: '执行任务', auth: 'exec.task.do', path: '/exec/task', component: ExecTask},
+@@ -92,21 +111,6 @@ export default [
+       {path: '/config/setting/:type/:id', component: ConfigSetting},
+     ]
+   },
+-  {icon: <MonitorOutlined/>, title: '监控中心', auth: 'monitor.monitor.view', path: '/monitor', component: MonitorIndex},
+-  {
+-    icon: <GlobalOutlined/>,
+-    title: 'IP地址管理',
+-    auth: 'ipam.subnet.view',
+-    path: '/ipam',
+-    component: IpamIndex
+-  },
+-  {
+-    icon: <AlertOutlined/>, title: '报警中心', auth: 'alarm.alarm.view|alarm.contact.view|alarm.group.view', child: [
+-      {title: '报警历史', auth: 'alarm.alarm.view', path: '/alarm/alarm', component: AlarmIndex},
+-      {title: '报警联系人', auth: 'alarm.contact.view', path: '/alarm/contact', component: AlarmContact},
+-      {title: '报警联系组', auth: 'alarm.group.view', path: '/alarm/group', component: AlarmGroup},
+-    ]
+-  },
+   {
+     icon: <SettingOutlined/>, title: '系统管理', auth: "system.account.view|system.role.view|system.setting.view", child: [
+       {title: '登录日志', auth: 'system.login.view', path: '/system/login', component: SystemLogin},

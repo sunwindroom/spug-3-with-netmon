@@ -13,7 +13,6 @@ import {
   ScheduleOutlined,
   DeploymentUnitOutlined,
   MonitorOutlined,
-  ApartmentOutlined,
   GlobalOutlined,
   AlertOutlined,
   SettingOutlined
@@ -33,7 +32,6 @@ import ConfigEnvironment from './pages/config/environment';
 import ConfigService from './pages/config/service';
 import ConfigApp from './pages/config/app';
 import ConfigSetting from './pages/config/setting';
-import MonitorIndex from './pages/monitor';
 import NetmonIndex from './pages/netmon';
 import IpamIndex from './pages/ipam';
 import AlarmIndex from './pages/alarm/alarm';
@@ -46,15 +44,15 @@ import SystemLogin from './pages/system/login';
 import WelcomeIndex from './pages/welcome/index';
 import WelcomeInfo from './pages/welcome/info';
 
+// 菜单编排说明（本次统一整理）：
+// 1. 工作台/仪表盘 —— 总览类页面放在最前
+// 2. 主机管理/IP地址管理/监控中心/报警中心 —— IT资源与可观测性相关功能放在一起，
+//    其中"监控中心"已合并原先并存的"监控中心(monitor)"与"IT资源监控(netmon)"两个重复入口，
+//    数据源、告警联系组、通知渠道全部统一，不再有两套互不相通的监控系统。
+// 3. 批量执行/应用发布/任务计划/配置中心 —— 发布运维类操作流程放在一起
+// 4. 系统管理 —— 固定放在最后，符合常见后台系统的编排习惯
 export default [
   {icon: <DesktopOutlined/>, title: '工作台', path: '/home', component: HomeIndex},
-  {
-    icon: <ApartmentOutlined/>,
-    title: 'IT资源监控',
-    auth: 'netmon.device.view',
-    path: '/netmon',
-    component: NetmonIndex
-  },
   {
     icon: <DashboardOutlined/>,
     title: '仪表盘',
@@ -63,6 +61,27 @@ export default [
     component: DashboardIndex
   },
   {icon: <CloudServerOutlined/>, title: '主机管理', auth: 'host.host.view', path: '/host', component: HostIndex},
+  {
+    icon: <GlobalOutlined/>,
+    title: 'IP地址管理',
+    auth: 'ipam.subnet.view',
+    path: '/ipam',
+    component: IpamIndex
+  },
+  {
+    icon: <MonitorOutlined/>,
+    title: '监控中心',
+    auth: 'netmon.device.view',
+    path: '/netmon',
+    component: NetmonIndex
+  },
+  {
+    icon: <AlertOutlined/>, title: '报警中心', auth: 'alarm.alarm.view|alarm.contact.view|alarm.group.view', child: [
+      {title: '报警历史', auth: 'alarm.alarm.view', path: '/alarm/alarm', component: AlarmIndex},
+      {title: '报警联系人', auth: 'alarm.contact.view', path: '/alarm/contact', component: AlarmContact},
+      {title: '报警联系组', auth: 'alarm.group.view', path: '/alarm/group', component: AlarmGroup},
+    ]
+  },
   {
     icon: <CodeOutlined/>, title: '批量执行', auth: 'exec.task.do|exec.template.view', child: [
       {title: '执行任务', auth: 'exec.task.do', path: '/exec/task', component: ExecTask},
@@ -90,21 +109,6 @@ export default [
       {title: '服务配置', auth: 'config.src.view', path: '/config/service', component: ConfigService},
       {title: '应用配置', auth: 'config.app.view', path: '/config/app', component: ConfigApp},
       {path: '/config/setting/:type/:id', component: ConfigSetting},
-    ]
-  },
-  {icon: <MonitorOutlined/>, title: '监控中心', auth: 'monitor.monitor.view', path: '/monitor', component: MonitorIndex},
-  {
-    icon: <GlobalOutlined/>,
-    title: 'IP地址管理',
-    auth: 'ipam.subnet.view',
-    path: '/ipam',
-    component: IpamIndex
-  },
-  {
-    icon: <AlertOutlined/>, title: '报警中心', auth: 'alarm.alarm.view|alarm.contact.view|alarm.group.view', child: [
-      {title: '报警历史', auth: 'alarm.alarm.view', path: '/alarm/alarm', component: AlarmIndex},
-      {title: '报警联系人', auth: 'alarm.contact.view', path: '/alarm/contact', component: AlarmContact},
-      {title: '报警联系组', auth: 'alarm.group.view', path: '/alarm/group', component: AlarmGroup},
     ]
   },
   {

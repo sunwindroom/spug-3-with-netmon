@@ -16,7 +16,7 @@ import {
 import { Chart, Geom, Coord, Legend, Tooltip, Axis } from 'bizcharts';
 import { http } from 'libs';
 import store from './store';
-import monitorStore from '../monitor/store';
+
 import styles from './DashboardExtra.module.less';
 
 const STATUS_COLOR = { online: '#52c41a', warning: '#faad14', critical: '#f5222d', offline: '#8c8c8c', unknown: '#d9d9d9' };
@@ -178,7 +178,7 @@ export default observer(function Overview() {
           <div style={{ flex: 1 }}/>
           <Button
             type="primary" size="small" icon={<PlusOutlined/>}
-            onClick={() => monitorStore.showForm()}
+            onClick={() => store.showForm()}
           >新建监控任务</Button>
         </div>
       )}

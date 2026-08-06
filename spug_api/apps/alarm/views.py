@@ -6,7 +6,6 @@ from libs import json_response, JsonParser, Argument, auth
 from libs.spug import Notification
 from libs.push import get_contacts
 from apps.alarm.models import Alarm, Group, Contact
-from apps.monitor.models import Detection
 from apps.setting.utils import AppSetting
 import json
 
@@ -19,7 +18,7 @@ class AlarmView(View):
 
 
 class GroupView(View):
-    @auth('alarm.group.view|monitor.monitor.add|monitor.monitor.edit|alarm.alarm.view')
+    @auth('alarm.group.view|netmon.device.add|netmon.device.edit|alarm.alarm.view')
     def get(self, request):
         groups = Group.objects.all()
         return json_response(groups)

@@ -7,7 +7,6 @@ from django.db import connections
 from django_redis import get_redis_connection
 from concurrent.futures import ThreadPoolExecutor
 from apps.schedule.executors import schedule_worker_handler
-from apps.monitor.executors import monitor_worker_handler
 from apps.exec.executors import exec_worker_handler
 from apps.netmon.executors import netmon_worker_handler
 from apps.notify.models import Notify
@@ -17,7 +16,6 @@ import time
 import os
 
 EXEC_WORKER_KEY = settings.EXEC_WORKER_KEY
-MONITOR_WORKER_KEY = settings.MONITOR_WORKER_KEY
 SCHEDULE_WORKER_KEY = settings.SCHEDULE_WORKER_KEY
 NETMON_WORKER_KEY = settings.NETMON_WORKER_KEY
 
@@ -54,14 +52,12 @@ class Worker:
     def run(self):
         logging.warning('Running worker')
         Thread(target=self.queue_monitor, daemon=True).start()
-        self.rds.delete(EXEC_WORKER_KEY, MONITOR_WORKER_KEY, SCHEDULE_WORKER_KEY, NETMON_WORKER_KEY)
+        self.rds.delete(EXEC_WORKER_KEY, SCHEDULE_WORKER_KEY, NETMON_WORKER_KEY)
         while True:
-            key, job = self.rds.blpop([EXEC_WORKER_KEY, SCHEDULE_WORKER_KEY, MONITOR_WORKER_KEY, NETMON_WORKER_KEY])
+            key, job = self.rds.blpop([EXEC_WORKER_KEY, SCHEDULE_WORKER_KEY, NETMON_WORKER_KEY])
             key = key.decode()
             if key == SCHEDULE_WORKER_KEY:
                 future = self._executor.submit(schedule_worker_handler, job)
-            elif key == MONITOR_WORKER_KEY:
-                future = self._executor.submit(monitor_worker_handler, job)
             elif key == EXEC_WORKER_KEY:
                 future = self._executor.submit(exec_worker_handler, job)
             elif key == NETMON_WORKER_KEY:

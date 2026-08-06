@@ -2,14 +2,14 @@
 # Copyright: (c) <spug.dev@gmail.com>
 # Released under the AGPL-3.0 License.
 from django.core.management.base import BaseCommand
-from apps.monitor.scheduler import Scheduler
+from apps.netmon.scheduler import Scheduler
 import logging
 
 logging.basicConfig(level=logging.WARNING, format='%(asctime)s %(message)s')
 
 
 class Command(BaseCommand):
-    help = 'Start unified scheduler (monitor + netmon)'
+    help = 'Start unified monitor scheduler (netmon)'
 
     def handle(self, *args, **options):
         s = Scheduler()

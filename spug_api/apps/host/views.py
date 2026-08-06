@@ -12,7 +12,7 @@ from apps.host.utils import batch_sync_host, _sync_host_extend
 from apps.exec.models import ExecTemplate
 from apps.app.models import Deploy
 from apps.schedule.models import Task
-from apps.monitor.models import Detection
+from apps.netmon.models import Device
 from libs.ssh import SSH, AuthenticationException
 from paramiko.ssh_exception import BadAuthenticationType
 from openpyxl import load_workbook
@@ -123,9 +123,9 @@ class HostView(View):
                 task = Task.objects.filter(targets__regex=regex).first()
                 if task:
                     return json_response(error=f'任务计划中的任务【{task.name}】关联了该主机，请解除关联后再尝试删除该主机')
-                detection = Detection.objects.filter(type__in=('3', '4'), targets__regex=regex).first()
-                if detection:
-                    return json_response(error=f'监控中心的任务【{detection.name}】关联了该主机，请解除关联后再尝试删除该主机')
+                device = Device.objects.filter(host_id=host_id).first()
+                if device:
+                    return json_response(error=f'IT资源监控中的设备【{device.name}】关联了该主机，请解除关联后再尝试删除该主机')
                 tpl = ExecTemplate.objects.filter(host_ids__regex=regex).first()
                 if tpl:
                     return json_response(error=f'执行模板【{tpl.name}】关联了该主机，请解除关联后再尝试删除该主机')

@@ -23,13 +23,14 @@ export default function () {
 
   useEffect(() => {
     const data = {};
-    http.get('/api/monitor/')
+    http.get('/api/netmon/device/')
       .then(res => {
-        for (let item of res.detections) {
-          if (!data[item.type]) {
-            data[item.type] = {value: item.type_alias, label: item.type_alias, children: []}
+        for (let item of res) {
+          const key = item.monitor_type_alias;
+          if (!data[key]) {
+            data[key] = {value: key, label: key, children: []}
           }
-          data[item.type].children.push({value: item.name, label: item.name})
+          data[key].children.push({value: item.name, label: item.name})
         }
         setOptions(Object.values(data))
       })

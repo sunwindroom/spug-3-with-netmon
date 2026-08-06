@@ -39,7 +39,6 @@ INSTALLED_APPS = [
     'apps.setting',
     'apps.exec',
     'apps.schedule',
-    'apps.monitor',
     'apps.alarm',
     'apps.config',
     'apps.app',
@@ -107,8 +106,6 @@ TEMPLATES = [
 TOKEN_TTL = 8 * 3600
 SCHEDULE_KEY = 'spug:schedule'
 SCHEDULE_WORKER_KEY = 'spug:schedule:worker'
-MONITOR_KEY = 'spug:monitor'
-MONITOR_WORKER_KEY = 'spug:monitor:worker'
 EXEC_WORKER_KEY = 'spug:exec:worker'
 NETMON_KEY = 'spug:netmon'
 NETMON_WORKER_KEY = 'spug:netmon:worker'

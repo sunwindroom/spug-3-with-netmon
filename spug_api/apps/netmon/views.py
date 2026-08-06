@@ -11,7 +11,8 @@ from apps.netmon.models import (
     MaintenanceWindow, RemediationAction, RemediationLog
 )
 
-from apps.netmon import discovery, reports as report_builder, stats as stats_builder, collectors
+from apps.netmon import discovery, reports as report_builder, stats as stats_builder, collectors, checks
+from apps.setting.utils import AppSetting
 from threading import Thread
 from datetime import datetime, timedelta
 from statistics import mean
@@ -54,8 +55,17 @@ class DeviceView(View):
             Argument('extra', required=False),
             Argument('rate', type=int, default=60),
             Argument('desc', required=False),
+            Argument('threshold', type=int, default=3),
+            Argument('quiet', type=int, default=24 * 60),
+            Argument('notify_grp', type=list, default=[]),
+            Argument('notify_mode', type=list, default=[]),
         ).parse(request.body)
         if error is None:
+            if set(form.notify_mode).intersection(['1', '2', '6']):
+                if not AppSetting.get_default('spug_push_key'):
+                    return json_response(error='报警方式微信、短信、电话需要配置推送服务（系统设置/推送服务设置），请配置后再启用该报警方式。')
+            form.notify_grp = json.dumps(form.notify_grp)
+            form.notify_mode = json.dumps(form.notify_mode)
             device_id = form.pop('id', None)
             rds_cli = get_redis_connection()
             if device_id:
@@ -151,6 +161,7 @@ def test_connectivity(request):
         Argument('snmp_community', default='public'),
         Argument('snmp_port', type=int, default=161),
         Argument('host_id', type=int, required=False),
+        Argument('extra', required=False),
     ).parse(request.body)
     if error:
         return json_response(error=error)
@@ -159,10 +170,16 @@ def test_connectivity(request):
     else:
         device = Device(
             ip=form.ip, monitor_type=form.monitor_type, snmp_community=form.snmp_community,
-            snmp_port=form.snmp_port, host_id=form.host_id
+            snmp_port=form.snmp_port, host_id=form.host_id, extra=form.extra
         )
     if not device:
         return json_response(error='设备不存在')
+    if device.is_check_type():
+        try:
+            is_ok, message = checks.run_check(device)
+        except Exception as e:
+            return json_response({'success': False, 'message': str(e)})
+        return json_response({'success': is_ok, 'message': message})
     try:
         result = collectors.collect(device)
     except Exception as e:
@@ -211,11 +228,44 @@ class TopologyView(View):
         return json_response(error=error)
 
 
+def _metric_stats(devices, key):
+    values = []
+    for d in devices:
+        try:
+            v = json.loads(d.last_value) if d.last_value else {}
+        except (TypeError, ValueError):
+            v = {}
+        if key in v:
+            values.append(v[key])
+    if not values:
+        return {'max': 0, 'avg': 0, 'min': 0}
+    return {'max': round(max(values), 1), 'avg': round(mean(values), 1), 'min': round(min(values), 1)}
+
+
+def _distribution(devices, key):
+    buckets = {'≥90%': 0, '70%~90%': 0, '40%~70%': 0, '<40%': 0}
+    for d in devices:
+        try:
+            v = json.loads(d.last_value) if d.last_value else {}
+        except (TypeError, ValueError):
+            v = {}
+        val = v.get(key)
+        if val is None:
+            continue
+        if val >= 90:
+            buckets['≥90%'] += 1
+        elif val >= 70:
+            buckets['70%~90%'] += 1
+        elif val >= 40:
+            buckets['40%~70%'] += 1
+        else:
+            buckets['<40%'] += 1
+    return [{'range': k, 'count': v} for k, v in buckets.items()]
+
+
 # ------------------------------------------------------------------ 实时总览大屏 -----
 @auth('netmon.device.view')
 def get_overview(request):
-    from apps.monitor.models import Detection
-    from apps.monitor.views import _build_target_status_list, _metric_stats, _distribution
     from apps.host.models import HostExtend
     from apps.alarm.models import Alarm
 
@@ -246,14 +296,13 @@ def get_overview(request):
     trend = stats_builder.anomaly_trend(all_devices, days=14)
     top_faulty = stats_builder.top_faulty_devices(all_devices, since_7d, now_str, limit=5)
 
-    # ---- 合并自原 monitor Dashboard 的数据 ----
-    target_list = _build_target_status_list()
+    # ---- 可用性检测类设备（原 monitor 模块的检测能力，现已统一到 Device 模型）的在线率统计 ----
+    check_devices = [d for d in all_devices if d.is_check_type()]
     type_stats = []
-    for code, alias in Detection.TYPES:
-        items = [x for x in target_list if x['type_code'] == code]
+    for code, alias in Device.CHECK_TYPES:
+        items = [d for d in check_devices if d.monitor_type == code]
         total = len(items)
-        fault = len([x for x in items if x['status'] == '3'])
-        online = total - fault
+        online = len([d for d in items if d.status not in ('critical', 'offline')])
         type_stats.append({
             'type': code, 'type_alias': alias, 'total': total, 'online': online,
             'rate': round(online / total * 100, 1) if total else 0.0,
@@ -320,7 +369,7 @@ def get_overview(request):
         'top_faulty_7d': top_faulty,
         'type_stats': type_stats,
         'recent_alerts_1h': recent_alerts_1h,
-        'resource_total_count': len(dev_list) + Detection.objects.count(),
+        'resource_total_count': devices.count(),
         'bar_charts': bar_charts,
         'memory_distribution': _distribution(dev_list, 'memory'),
         'cpu_distribution': _distribution(dev_list, 'cpu'),

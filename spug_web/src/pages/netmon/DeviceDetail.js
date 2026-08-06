@@ -57,6 +57,14 @@ export default observer(function DeviceDetail() {
   const device = store.device;
   if (!device || !device.id) return null;
 
+  let lastMessage = '';
+  if (device.is_check_type) {
+    try {
+      const lv = typeof device.last_value === 'string' ? JSON.parse(device.last_value || '{}') : (device.last_value || {});
+      lastMessage = lv.message || '';
+    } catch (e) { /* ignore */ }
+  }
+
   return (
     <Drawer
       title={`${device.name}（${device.ip}）`}
@@ -69,13 +77,23 @@ export default observer(function DeviceDetail() {
           <Tag color={STATUS_COLOR[device.status]}>{device.status_alias || device.status}</Tag>
         </Descriptions.Item>
         <Descriptions.Item label="分类">{device.category_alias || device.category}</Descriptions.Item>
-        <Descriptions.Item label="采集方式">{device.monitor_type_alias || device.monitor_type}</Descriptions.Item>
-        <Descriptions.Item label="采集周期">{device.rate}s</Descriptions.Item>
+        <Descriptions.Item label="监控方式">{device.monitor_type_alias || device.monitor_type}</Descriptions.Item>
+        <Descriptions.Item label="检测/采集周期">{device.rate}s</Descriptions.Item>
         <Descriptions.Item label="最近检测时间" span={2}>{device.latest_check_at || '-'}</Descriptions.Item>
+        {device.is_check_type && (
+          <Descriptions.Item label="最近检测结果" span={2}>{lastMessage || '-'}</Descriptions.Item>
+        )}
       </Descriptions>
-      <Row gutter={16}>
-        {METRICS.map(m => <MetricChart key={m.key} deviceId={device.id} metric={m}/>)}
-      </Row>
+      {device.is_check_type ? (
+        <Empty
+          description="该监控项为可用性检测类型（是/否正常），不产生数值指标趋势图，告警历史请前往「报警中心」查看。"
+          style={{ padding: '40px 0' }}
+        />
+      ) : (
+        <Row gutter={16}>
+          {METRICS.map(m => <MetricChart key={m.key} deviceId={device.id} metric={m}/>)}
+        </Row>
+      )}
     </Drawer>
   )
 })

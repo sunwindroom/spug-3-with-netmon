@@ -103,7 +103,10 @@ class Store {
   };
 
   showForm = (info) => {
-    this.device = info ? { ...info } : { category: 'server', monitor_type: 'ping', rate: 60, extra: '' };
+    this.device = info ? { ...info } : {
+      category: 'server', monitor_type: 'ping', rate: 60, extra: '',
+      threshold: 3, quiet: 24 * 60, notify_grp: [], notify_mode: [],
+    };
     this.formVisible = true;
   };
 

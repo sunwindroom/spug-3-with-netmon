@@ -9,10 +9,8 @@ import { AuthDiv, Breadcrumb } from 'components';
 import Overview from './Overview';
 import Topology from './Topology';
 import Devices from './Devices';
-import Anomaly from './Anomaly';
 import Discovery from './Discovery';
 import Reports from './Reports';
-import AlertRules from './AlertRules';
 import MaintenanceWindows from './MaintenanceWindows';
 import Remediation from './Remediation';
 import DeviceDetail from './DeviceDetail';
@@ -35,8 +33,6 @@ export default function NetmonIndex() {
         <Tabs.TabPane tab="实时总览" key="overview"><Overview/></Tabs.TabPane>
         <Tabs.TabPane tab="拓扑视图" key="topology"><Topology/></Tabs.TabPane>
         <Tabs.TabPane tab="资源台账" key="devices"><Devices/></Tabs.TabPane>
-        <Tabs.TabPane tab="异常事件" key="anomaly"><Anomaly/></Tabs.TabPane>
-        <Tabs.TabPane tab="告警规则" key="alert-rule"><AlertRules/></Tabs.TabPane>
         <Tabs.TabPane tab="维护窗口" key="maintenance"><MaintenanceWindows/></Tabs.TabPane>
         <Tabs.TabPane tab="自动化处置" key="remediation"><Remediation/></Tabs.TabPane>
         <Tabs.TabPane tab="自动发现" key="discovery"><Discovery/></Tabs.TabPane>

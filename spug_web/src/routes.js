@@ -37,6 +37,7 @@ import IpamIndex from './pages/ipam';
 import AlarmIndex from './pages/alarm/alarm';
 import AlarmGroup from './pages/alarm/group';
 import AlarmContact from './pages/alarm/contact';
+import AlertRules from './pages/netmon/AlertRules';
 import SystemAccount from './pages/system/account';
 import SystemRole from './pages/system/role';
 import SystemSetting from './pages/system/setting';
@@ -78,6 +79,7 @@ export default [
   {
     icon: <AlertOutlined/>, title: '报警中心', auth: 'alarm.alarm.view|alarm.contact.view|alarm.group.view', child: [
       {title: '报警历史', auth: 'alarm.alarm.view', path: '/alarm/alarm', component: AlarmIndex},
+      {title: '告警规则', auth: 'netmon.device.edit', path: '/alarm/alert-rule', component: AlertRules},
       {title: '报警联系人', auth: 'alarm.contact.view', path: '/alarm/contact', component: AlarmContact},
       {title: '报警联系组', auth: 'alarm.group.view', path: '/alarm/group', component: AlarmGroup},
     ]

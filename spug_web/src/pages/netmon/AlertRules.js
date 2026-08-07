@@ -5,8 +5,8 @@
  */
 import React, { useEffect, useState } from 'react';
 import { observer } from 'mobx-react';
-import { Table, Space, Select, Input, InputNumber, Form, Modal, message, Tag, Alert } from 'antd';
-import { AuthButton, LinkButton } from 'components';
+import { Table, Space, Select, Input, InputNumber, Form, Modal, message, Tag, Alert, Breadcrumb } from 'antd';
+import { AuthButton, AuthDiv, LinkButton } from 'components';
 import { http } from 'libs';
 import store from './store';
 
@@ -17,7 +17,7 @@ const METRICS = [
 const LEVEL_COLOR = { info: 'blue', warning: 'orange', critical: 'red' };
 
 export default observer(function AlertRules() {
-  useEffect(() => { store.fetchAlertRules() }, []);
+  useEffect(() => { store.fetchAlertRules(); store.fetchDevices(); store.fetchGroups() }, []);
 
   function handleDelete(record) {
     Modal.confirm({
@@ -44,7 +44,12 @@ export default observer(function AlertRules() {
   ];
 
   return (
-    <div>
+    <AuthDiv auth="netmon.device.edit">
+      <Breadcrumb>
+        <Breadcrumb.Item>首页</Breadcrumb.Item>
+        <Breadcrumb.Item>报警中心</Breadcrumb.Item>
+        <Breadcrumb.Item>告警规则</Breadcrumb.Item>
+      </Breadcrumb>
       <Alert
         type="info" showIcon style={{ marginBottom: 16 }}
         message="静态阈值规则用于对明确已知的红线指标（如磁盘使用率>90%）精准报警；未配置规则的指标仍会由系统的3-sigma动态基线自动兜底检测。可为规则配置「升级策略」，长时间未处理的异常会自动二次通知，避免遗漏。"
@@ -54,7 +59,7 @@ export default observer(function AlertRules() {
       </Space>
       <Table rowKey="id" loading={store.alertRuleFetching} columns={columns} dataSource={store.alertRules}/>
       {store.alertRuleFormVisible && <RuleForm/>}
-    </div>
+    </AuthDiv>
   )
 })
 

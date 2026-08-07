@@ -9,13 +9,14 @@ import {
   Table, Tag, Space, Select, Input, Form, Modal, InputNumber, message, Upload, Button, Alert, TreeSelect,
   Radio, Checkbox, Transfer, Divider
 } from 'antd';
-import { UploadOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { UploadOutlined, ThunderboltOutlined, SearchOutlined } from '@ant-design/icons';
 import { Link } from 'react-router-dom';
 import { AuthButton, LinkButton, ACEditor } from 'components';
 import { http, cleanCommand } from 'libs';
 import store from './store';
 import hostStore from 'pages/host/store';
 import groupStore from '../alarm/group/store';
+import HostSelector from 'pages/host/Selector';
 import TemplateSelector from '../exec/task/TemplateSelector';
 
 const STATUS_COLOR = { online: 'green', warning: 'orange', critical: 'red', offline: 'default', unknown: 'default' };
@@ -38,6 +39,47 @@ const CHECK_TYPE_OPTIONS = [
   ['shell', '命令检测/退出码（需绑定主机）'],
   ['log', '日志关键字监控（需绑定主机）'],
 ];
+function IpInputField({ form, record }) {
+  const [selectedHostIds, setSelectedHostIds] = useState([]);
+
+  function handleHostSelectorChange(rows) {
+    const list = Array.isArray(rows) ? rows : [rows];
+    setSelectedHostIds(list.map(h => h.id));
+    if (list.length === 1) {
+      const h = list[0];
+      const ip = (h.private_ip_address && h.private_ip_address[0])
+        || (h.public_ip_address && h.public_ip_address[0])
+        || h.hostname || '';
+      form.setFieldsValue({ ip, host_id: h.id });
+    } else if (list.length > 1) {
+      const ips = list.map(h =>
+        (h.private_ip_address && h.private_ip_address[0])
+        || (h.public_ip_address && h.public_ip_address[0])
+        || h.hostname || ''
+      ).join(', ');
+      form.setFieldsValue({ ip: ips, host_id: list[0].id });
+    }
+  }
+
+  const suffix = selectedHostIds.length > 0 ? (
+    <HostSelector mode="rows" onlyOne={false} value={selectedHostIds} onChange={handleHostSelectorChange}>
+      <SearchOutlined style={{ color: '#1890ff', cursor: 'pointer' }}/>
+    </HostSelector>
+  ) : (
+    <HostSelector mode="rows" onlyOne={false} value={[]} onChange={handleHostSelectorChange}>
+      <SearchOutlined style={{ color: '#bfbfbf', cursor: 'pointer' }}/>
+    </HostSelector>
+  );
+
+  return (
+    <Form.Item name="ip" label="IP地址" rules={[{ required: true, message: '请输入IP地址或点击右侧图标选择主机' }]}
+      extra={selectedHostIds.length > 0 ? `已关联 ${selectedHostIds.length} 台主机（点击输入框右侧图标可重新选择）` : '可手动输入IP，或点击右侧图标从主机管理中选择'}>
+      <Input placeholder="例如：192.168.1.1" suffix={suffix} allowClear
+        onChange={e => { if (!e.target.value) setSelectedHostIds([]) }}/>
+    </Form.Item>
+  );
+}
+
 const CHECK_TYPES = CHECK_TYPE_OPTIONS.map(x => x[0]);
 const HOST_REQUIRED_TYPES = ['process', 'docker', 'shell', 'log'];
 
@@ -172,13 +214,19 @@ function buildExtra(monitorType, values) {
   }
 }
 
-function DeviceForm({ groupId }) {
+export function DeviceForm({ groupId }) {
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [showTmp, setShowTmp] = useState(false);
   const record = store.device;
   const parsedExtra = parseExtra(record.extra);
+
+  useEffect(() => {
+    if (hostStore.rawRecords.length === 0) {
+      if (hostStore.initial) { hostStore.initial() } else if (hostStore.fetchRecords) { hostStore.fetchRecords() }
+    }
+  }, []);
 
   function handleSubmit() {
     form.validateFields().then(values => {
@@ -190,7 +238,7 @@ function DeviceForm({ groupId }) {
         notify_mode: values.notify_mode || [],
       };
       // 这些是仅用于表单交互的临时字段，提交前清理掉，避免污染后端参数
-      Object.keys(data).forEach(k => { if (k.startsWith('chk_')) delete data[k] });
+      Object.keys(data).forEach(k => { if (k.startsWith('chk_') || k.startsWith('_')) delete data[k] });
       http.post('/api/netmon/device/', data)
         .then(() => { message.success('保存成功'); store.formVisible = false; store.fetchDevices(groupId) })
         .finally(() => setSaving(false))
@@ -273,9 +321,7 @@ function DeviceForm({ groupId }) {
               <>
                 {/* IP地址：指标采集类型 与 端口/数据库/Ping可用性检测 都需要 */}
                 {['ping', 'snmp', 'agent', 'script', 'port', 'database', 'ping_check'].includes(mt) && (
-                  <Form.Item name="ip" label="IP地址" rules={[{ required: true, message: '请输入IP地址' }]}>
-                    <Input placeholder="例如：192.168.1.1"/>
-                  </Form.Item>
+                  <IpInputField form={form} record={record}/>
                 )}
 
                 {mt === 'snmp' && (

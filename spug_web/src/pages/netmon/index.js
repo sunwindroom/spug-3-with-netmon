@@ -20,10 +20,9 @@ import store from './store';
 
 export default function NetmonIndex() {
   useEffect(() => {
-    store.autoReload = true;
     store.fetchGroups();
     store.fetchDevices();
-    return () => { store.autoReload = false; store.stopDiscoveryPolling() }
+    return () => { store.stopDiscoveryPolling(); store.stopOverviewPolling(); }
   }, []);
 
   return (

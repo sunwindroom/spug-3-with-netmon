@@ -62,15 +62,23 @@ class Store {
   @observable remediationAction = {};
   @observable remediationLogs = [];
 
+  _ovTimer = null;
+
   fetchOverview = () => {
-    if (this.autoReload === false) return;
     this.ovFetching = true;
     return http.get('/api/netmon/overview/')
       .then(res => this.overview = res)
-      .finally(() => {
-        this.ovFetching = false;
-        if (this.autoReload) setTimeout(this.fetchOverview, 10000)
-      })
+      .finally(() => { this.ovFetching = false })
+  };
+
+  startOverviewPolling = (interval = 30000) => {
+    this.stopOverviewPolling();
+    this.fetchOverview();
+    this._ovTimer = setInterval(this.fetchOverview, interval);
+  };
+
+  stopOverviewPolling = () => {
+    if (this._ovTimer) { clearInterval(this._ovTimer); this._ovTimer = null }
   };
 
   fetchTopology = (group_id) => {

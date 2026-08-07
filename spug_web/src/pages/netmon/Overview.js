@@ -16,7 +16,7 @@ import {
 import { Chart, Geom, Coord, Legend, Tooltip, Axis } from 'bizcharts';
 import { http } from 'libs';
 import store from './store';
-
+import { DeviceForm } from './Devices';
 import styles from './DashboardExtra.module.less';
 
 const STATUS_COLOR = { online: '#52c41a', warning: '#faad14', critical: '#f5222d', offline: '#8c8c8c', unknown: '#d9d9d9' };
@@ -103,7 +103,8 @@ function DonutChart({ data, valueField = 'count', nameField = 'range', height = 
 
 export default observer(function Overview() {
   useEffect(() => {
-    store.fetchOverview();
+    store.startOverviewPolling();
+    return () => { store.stopOverviewPolling(); }
   }, []);
 
   const ov = store.overview;
@@ -398,6 +399,7 @@ export default observer(function Overview() {
           locale={{ emptyText: '暂无异常，一切正常' }}
         />
       </Card>
+      {store.formVisible && <DeviceForm/>}
     </div>
   )
 })

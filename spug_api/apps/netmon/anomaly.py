@@ -69,12 +69,13 @@ def models_q_device_or_group(device):
 
 def check_dynamic_baseline(device, metric_key, value):
     """3-sigma 动态基线检测，覆盖没有配置静态阈值规则的指标"""
+    from apps.netmon.notify_utils import dispatch_alarm_notify
     history = list(
         MetricRecord.objects.filter(device=device, metric_key=metric_key)
         .order_by('-collected_at').values_list('value', flat=True)[:BASELINE_WINDOW]
     )
     if len(history) < 10:
-        return None  # 样本不足，暂不做基线判定
+        return None
     mu, sigma = mean(history), (stdev(history) if len(set(history)) > 1 else 0)
     if sigma == 0:
         return None
@@ -85,10 +86,18 @@ def check_dynamic_baseline(device, metric_key, value):
             f'{device.name}({device.ip}) 指标[{metric_key}] 当前值 {value}，'
             f'偏离近期基线(均值 {round(mu, 2)}，标准差 {round(sigma, 2)}) {round(deviation, 1)} 个标准差'
         )
-        return AnomalyEvent.objects.create(
+        event = AnomalyEvent.objects.create(
             device=device, metric_key=metric_key, value=value, baseline=round(mu, 2),
             deviation=round(deviation, 2), method='3sigma', level=level, message=message
         )
+        try:
+            target = f'{device.name}({device.ip})'
+            dispatch_alarm_notify(
+                f'[动态基线] {metric_key} 异常', target, message,
+                device.notify_grp, device.notify_mode, level)
+        except Exception:
+            pass
+        return event
     return None
 
 

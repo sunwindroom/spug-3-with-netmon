@@ -51,7 +51,7 @@ class Device(models.Model, ModelMixin):
     )
 
     name = models.CharField(max_length=100)
-    ip = models.CharField(max_length=50, db_index=True)
+    ip = models.CharField(max_length=500, db_index=True)
     category = models.CharField(max_length=20, choices=CATEGORIES, default='server')
     group = models.ForeignKey(Group, models.SET_NULL, null=True, blank=True, related_name='netmon_devices')
     vendor = models.CharField(max_length=50, null=True, blank=True)

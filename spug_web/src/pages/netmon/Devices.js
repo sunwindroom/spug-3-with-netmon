@@ -3,7 +3,7 @@
  * Copyright (c) <spug.dev@gmail.com>
  * Released under the AGPL-3.0 License.
  */
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { observer } from 'mobx-react';
 import {
   Table, Tag, Space, Select, Input, Form, Modal, InputNumber, message, Upload, Button, Alert, TreeSelect,
@@ -215,12 +215,15 @@ function buildExtra(monitorType, values) {
 }
 
 export function DeviceForm({ groupId }) {
+  const record = store.device;
+  const parsedExtra = parseExtra(record.extra);
   const [form] = Form.useForm();
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [showTmp, setShowTmp] = useState(false);
-  const record = store.device;
-  const parsedExtra = parseExtra(record.extra);
+  const [scriptBody, setScriptBody] = useState(record.monitor_type === 'script' ? (record.extra || '') : '');
+  const [scriptKey, setScriptKey] = useState(0);
+  const editorRef = useRef(null);
 
   useEffect(() => {
     if (hostStore.rawRecords.length === 0) {
@@ -313,7 +316,7 @@ export function DeviceForm({ groupId }) {
           </Select>
         </Form.Item>
 
-        <Form.Item noStyle shouldUpdate={(p, c) => p.monitor_type !== c.monitor_type}>
+        <Form.Item noStyle shouldUpdate={() => true}>
           {({ getFieldValue }) => {
             const mt = getFieldValue('monitor_type');
             const needHost = HOST_REQUIRED_TYPES.includes(mt);
@@ -341,11 +344,13 @@ export function DeviceForm({ groupId }) {
                     label="采集脚本内容（需在标准输出打印 key=value 形式的数值指标）"
                     extra={<LinkButton onClick={() => setShowTmp(true)}>从模板添加</LinkButton>}>
                     <ACEditor
+                      key={`script-${scriptKey}`}
                       mode="sh"
-                      value={record.monitor_type === 'script' ? (record.extra || '') : ''}
+                      value={scriptBody}
                       width="100%"
                       height="160px"
-                      onChange={e => { record.extra = cleanCommand(e); form.setFieldsValue({ extra: cleanCommand(e) }) }}/>
+                      onLoad={inst => { editorRef.current = inst }}
+                      onChange={e => { form.setFieldsValue({ extra: cleanCommand(e) }) }}/>
                   </Form.Item>
                 )}
 
@@ -462,7 +467,12 @@ export function DeviceForm({ groupId }) {
         </Form.Item>
         <Button icon={<ThunderboltOutlined/>} loading={testing} onClick={handleTest}>测试连通性/可用性</Button>
       </Form>
-      {showTmp && <TemplateSelector onOk={({ body }) => { record.extra = body; form.setFieldsValue({ extra: body }) }} onCancel={() => setShowTmp(false)}/>}
+      {showTmp && <TemplateSelector onOk={({ body }) => {
+        const content = body || '';
+        setScriptBody(content);
+        setScriptKey(k => k + 1);
+        form.setFieldsValue({ extra: content });
+      }} onCancel={() => setShowTmp(false)}/>}
     </Modal>
   )
 }

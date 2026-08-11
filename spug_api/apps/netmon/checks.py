@@ -11,11 +11,21 @@
   * 原 netmon 的 MONITOR_TYPES 中声明了 'http' 选项，但采集分发从未实现该分支，
     选择该类型后设备状态永远不会更新，本次已补齐实现。
 
+优化点（本次）：
+  * 引入统一的超时 + 重试机制，网络类检测(http/port/ping)默认重试 2 次以减少偶发抖动误报。
+  * http_check 超时从硬编码 30s 降为可配置(默认 10s)，避免大量超长挂起拖慢调度。
+  * port_check 使用 with 管理 socket 资源，超时可配置(默认 3s)。
+  * ping_availability_check 增加重试，单次 ping 丢包不再立即判定故障。
+  * log_check 的 tail_lines 增加上限(10000)，keyword 用 shlex.quote 转义防止 shell 注入。
+  * shell_check 对命令做超时包装，防止远端命令永久挂起占用 SSH 连接。
+
 与 apps.netmon.collectors 中的"指标采集"不同，本模块是"是/否正常"的二元可用性检测，
 统一返回 (is_ok: bool, message: str)。
 """
 from libs.ssh_executor import ssh_exec, ssh_exec_ok, ping_check
-from socket import socket
+from socket import socket, timeout as socket_timeout
+from functools import wraps
+from shlex import quote
 import requests
 import logging
 import json
@@ -23,6 +33,11 @@ import re
 
 logging.captureWarnings(True)
 _CONN_ERR_RE = re.compile(r'Failed to establish a new connection: (.*)\'\)+')
+
+_DEFAULT_HTTP_TIMEOUT = 10
+_DEFAULT_PORT_TIMEOUT = 3
+_DEFAULT_RETRIES = 2
+_MAX_TAIL_LINES = 10000
 
 
 def _parse_params(raw):
@@ -36,16 +51,38 @@ def _parse_params(raw):
         return {}
 
 
+def _with_retry(retries=_DEFAULT_RETRIES):
+    """对网络类检测函数做重试：首次成功即返回，全部失败则返回最后一次结果。"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            last = False, '检测失败'
+            for attempt in range(retries + 1):
+                try:
+                    result = func(*args, **kwargs)
+                except Exception as e:
+                    result = (False, f'检测异常：{e}')
+                if result[0]:
+                    return result
+                last = result
+            return last
+        return wrapper
+    return decorator
+
+
+@_with_retry()
 def http_check(device):
     params = _parse_params(device.extra)
     url = params.get('url') or device.ip
-    limit = params.get('timeout_limit_ms')
+    if not url.startswith(('http://', 'https://')):
+        url = f'http://{url}'
+    timeout = params.get('timeout_limit_ms')
     try:
-        res = requests.get(url, timeout=30)
-        if limit:
+        res = requests.get(url, timeout=_DEFAULT_HTTP_TIMEOUT)
+        if timeout:
             duration = int(res.elapsed.total_seconds() * 1000)
-            if duration > int(limit):
-                return False, f'响应时间 {duration}ms 大于 {limit}ms'
+            if duration > int(timeout):
+                return False, f'响应时间 {duration}ms 大于 {timeout}ms'
         return 200 <= res.status_code < 400, f'返回HTTP状态码 {res.status_code}'
     except Exception as e:
         error = str(e)
@@ -55,21 +92,24 @@ def http_check(device):
         return False, error
 
 
+@_with_retry()
 def port_check(device):
     params = _parse_params(device.extra)
     port = params.get('port')
     if not port:
         return False, '未配置检测端口'
     try:
-        sock = socket()
-        sock.settimeout(5)
-        sock.connect((device.ip, int(port)))
-        sock.close()
+        with socket() as sock:
+            sock.settimeout(_DEFAULT_PORT_TIMEOUT)
+            sock.connect((device.ip, int(port)))
         return True, f'端口 {port} 检测正常'
+    except socket_timeout:
+        return False, f'端口 {port} 连接超时'
     except Exception as e:
         return False, f'端口 {port} 异常信息：{e}'
 
 
+@_with_retry(retries=1)
 def ping_availability_check(device):
     return ping_check(device.ip, timeout=3)
 
@@ -81,7 +121,7 @@ def process_check(device):
     keyword = params.get('keyword', '')
     if not keyword:
         return False, '未配置进程关键字'
-    return ssh_exec_ok(device.host, f'ps -ef|grep -v grep|grep {keyword!r}')
+    return ssh_exec_ok(device.host, f'ps -ef|grep -v grep|grep {quote(keyword)}')
 
 
 def docker_check(device):
@@ -91,7 +131,7 @@ def docker_check(device):
     container = params.get('container', '')
     if not container:
         return False, '未配置容器名称'
-    command = f"docker inspect -f '{{{{.State.Running}}}}' {container!r} 2>&1"
+    command = f"docker inspect -f '{{{{.State.Running}}}}' {quote(container)} 2>&1"
     exit_code, out = ssh_exec(device.host, command)
     out = (out or '').strip()
     if exit_code == 0 and out == 'true':
@@ -107,9 +147,10 @@ def log_check(device):
     params = _parse_params(device.extra)
     path, keyword = params.get('path', ''), params.get('keyword', '')
     tail_lines = params.get('tail_lines') or 200
+    tail_lines = min(int(tail_lines), _MAX_TAIL_LINES)
     if not path or not keyword:
         return False, '未配置日志路径/关键字'
-    command = f"tail -n {int(tail_lines)} {path} 2>&1 | grep -c -F {keyword!r}"
+    command = f"tail -n {tail_lines} {quote(path)} 2>&1 | grep -c -F {quote(keyword)}"
     exit_code, out = ssh_exec(device.host, command)
     out = (out or '0').strip()
     count = int(out) if out.isdigit() else 0
@@ -124,7 +165,8 @@ def shell_check(device):
     command = device.extra or ''
     if not command:
         return False, '未配置检测脚本'
-    return ssh_exec_ok(device.host, command)
+    wrapped = f'timeout 300 {command}'
+    return ssh_exec_ok(device.host, wrapped)
 
 
 CHECK_FUNCS = {

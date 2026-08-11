@@ -1,5 +1,4 @@
 # Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
-# Copyright: (c) <spug.dev@gmail.com>
 # Released under the AGPL-3.0 License.
 """
 指标采集器
@@ -9,9 +8,16 @@
   * ping  —— 时延(rtt)/丢包率(loss)，适用于任意可达的网络设备
   * snmp  —— 标准 MIB（HOST-RESOURCES-MIB / IF-MIB），适用于交换机/路由器/防火墙等网络设备
   * agent —— 复用 spug 已有主机凭据通过 SSH 采集 CPU/内存/磁盘/网卡，适用于已经纳管的服务器
+
+优化点（本次）：
+  * _ping_once 增加 subprocess timeout，防止 ping 进程挂起。
+  * collect_ping 用 ThreadPoolExecutor 并行采样，4 次 ping 不再串行阻塞。
+  * collect_snmp 用单次 nextCmd 传入多个 ObjectType 批量查询，减少 SNMP 往返次数。
+  * collect_agent 的 SSH 命令加 timeout 包装，防止远端命令挂起占用连接。
 """
 from django_redis import get_redis_connection
 from libs.ssh_executor import ssh_exec, ping_check
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from statistics import mean
 import subprocess
 import platform
@@ -20,6 +26,7 @@ import time
 import re
 
 RDS_PREV_KEY = 'spug:netmon:prev:{}:{}'  # 上一次采样(用于网卡流量等计数器差值计算)
+_PING_SUBPROCESS_TIMEOUT = 5
 
 
 def _ping_once(addr, timeout=1):
@@ -29,7 +36,11 @@ def _ping_once(addr, timeout=1):
     else:
         cmd = f'ping -c 1 -W {int(timeout)} {addr}'
     t0 = time.perf_counter()
-    task = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        task = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=_PING_SUBPROCESS_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, None
     elapsed_ms = (time.perf_counter() - t0) * 1000
     ok = task.returncode == 0
     if ok:
@@ -42,11 +53,18 @@ def _ping_once(addr, timeout=1):
 
 def collect_ping(device, samples=4):
     ok_count, rtts = 0, []
-    for _ in range(samples):
+    if samples <= 1:
         ok, rtt = _ping_once(device.ip)
         if ok:
-            ok_count += 1
-            rtts.append(rtt)
+            ok_count, rtts = 1, [rtt]
+    else:
+        with ThreadPoolExecutor(max_workers=min(samples, 4)) as pool:
+            futures = [pool.submit(_ping_once, device.ip) for _ in range(samples)]
+            for fut in as_completed(futures):
+                ok, rtt = fut.result()
+                if ok:
+                    ok_count += 1
+                    rtts.append(rtt)
     loss = round((samples - ok_count) / samples * 100, 2)
     result = {'loss': loss}
     if rtts:
@@ -65,8 +83,6 @@ def collect_snmp(device):
         logging.warning('pysnmp 未安装，无法执行 SNMP 采集，请 pip install pysnmp 后重试')
         return None
 
-    # HOST-RESOURCES-MIB: hrProcessorLoad(.1.3.6.1.2.1.25.3.3.1.2)
-    # UCD-SNMP-MIB(常见网络设备兼容): memTotalReal/memAvailReal
     oids = {
         'cpu': '1.3.6.1.2.1.25.3.3.1.2.1',
         'mem_total': '1.3.6.1.4.1.2021.4.5.0',
@@ -75,22 +91,24 @@ def collect_snmp(device):
         'if_out': '1.3.6.1.2.1.2.2.1.16.1',
     }
     result = {}
-    for key, oid in oids.items():
-        try:
-            it = getCmd(
-                SnmpEngine(),
-                CommunityData(device.snmp_community, mpModel=0 if device.snmp_version == '1' else 1),
-                UdpTransportTarget((device.ip, device.snmp_port), timeout=3, retries=1),
-                ContextData(),
-                ObjectType(ObjectIdentity(oid))
-            )
-            error_indication, error_status, _, var_binds = next(it)
-            if error_indication or error_status:
-                continue
-            value = var_binds[0][1]
-            result[key] = float(value)
-        except Exception as e:
-            logging.warning(f'SNMP采集异常 device={device.ip} oid={oid}: {e}')
+    try:
+        var_binds = [ObjectType(ObjectIdentity(oid)) for oid in oids.values()]
+        it = getCmd(
+            SnmpEngine(),
+            CommunityData(device.snmp_community, mpModel=0 if device.snmp_version == '1' else 1),
+            UdpTransportTarget((device.ip, device.snmp_port), timeout=3, retries=1),
+            ContextData(),
+            *var_binds
+        )
+        error_indication, error_status, _, var_binds = next(it)
+        if not error_indication and not error_status:
+            for key, var_bind in zip(oids.keys(), var_binds):
+                try:
+                    result[key] = float(var_bind[1])
+                except (TypeError, ValueError):
+                    pass
+    except Exception as e:
+        logging.warning(f'SNMP批量采集异常 device={device.ip}: {e}')
 
     output = {}
     if 'cpu' in result:
@@ -132,7 +150,7 @@ def collect_agent(device):
         "echo '#DISK#'; df -h / | tail -1; "
         "echo '#NET#'; cat /proc/net/dev | grep -v 'lo:' | grep ':' | head -1"
     )
-    exit_code, out = ssh_exec(host, script)
+    exit_code, out = ssh_exec(host, f'timeout 30 {script}')
     if exit_code != 0 or not out:
         return None
 
@@ -178,7 +196,7 @@ def collect_script(device):
     if not device.extra:
         return None
     host = device.host
-    exit_code, out = ssh_exec(host, device.extra)
+    exit_code, out = ssh_exec(host, f'timeout 60 {device.extra}')
     if exit_code != 0 or not out:
         return None
     result = {}

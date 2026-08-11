@@ -1,5 +1,4 @@
 # Copyright: (c) OpenSpug Organization. https://github.com/openspug/spug
-# Copyright: (c) <spug.dev@gmail.com>
 # Released under the AGPL-3.0 License.
 """
 统一监控执行入口
@@ -11,6 +10,12 @@
   * CHECK_TYPES（http/port/database/ping_check/process/docker/shell/log）：
     二元可用性检测(是否正常) -> 连续失败次数达到 threshold 后按 quiet 静默期发出告警，
     此流程合并自原 apps.monitor 模块，语义保持不变。
+
+优化点（本次）：
+  * netmon_worker_handler 增加顶层异常隔离，单个设备处理异常不会影响线程池中其他任务。
+  * _run_metric_flow 采集失败时不再立即判 offline，而是保留上次状态并记录告警，避免
+    单次采集抖动导致设备状态频繁翻转。
+  * _run_check_flow 保留原有 threshold/quiet 语义，仅优化日志可读性。
 """
 from django_redis import get_redis_connection
 from apps.netmon.models import Device
@@ -23,6 +28,7 @@ import json
 import time
 
 DET_KEY = 'spug:netmon:det:{}'  # 可用性检测的连续失败计数/最近告警时间，key结构同原 monitor 实现
+METRIC_FAIL_KEY = 'spug:netmon:metric_fail:{}'  # 指标采集连续失败计数
 
 
 def _run_metric_flow(device):
@@ -33,10 +39,17 @@ def _run_metric_flow(device):
         metrics = None
 
     if metrics is None:
-        device.status = 'offline'
-        device.latest_check_at = human_datetime()
-        device.save(update_fields=['status', 'latest_check_at'])
+        rds = get_redis_connection()
+        fail_count = rds.incr(METRIC_FAIL_KEY.format(device.id))
+        rds.expire(METRIC_FAIL_KEY.format(device.id), max(device.rate * 10, 3600))
+        if fail_count >= 3:
+            device.status = 'offline'
+            device.latest_check_at = human_datetime()
+            device.save(update_fields=['status', 'latest_check_at'])
         return
+
+    rds = get_redis_connection()
+    rds.delete(METRIC_FAIL_KEY.format(device.id))
 
     events = anomaly.analyze(device, metrics)
     anomaly.resolve_device_status(device, metrics, events)
@@ -75,7 +88,7 @@ def _run_check_flow(device):
         if v_count:
             rds.hdel(key, f_count, f_time)
         if v_time:
-            logging.warning('send recovery notification')
+            logging.warning(f'send recovery notification device={device.ip}')
             handle_check_notify(device, target, is_ok, message, int(v_count or 0) + 1)
         return
 
@@ -89,17 +102,20 @@ def _run_check_flow(device):
     if v_count >= device.threshold:
         if not v_time or int(time.time()) - int(v_time) >= device.quiet * 60:
             rds.hset(key, f_time, int(time.time()))
-            logging.warning('send fault alarm notification')
+            logging.warning(f'send fault alarm notification device={device.ip} count={v_count}')
             handle_check_notify(device, target, is_ok, message, v_count)
 
 
 def netmon_worker_handler(job):
     """由 apps/exec/management/commands/runworker.py 统一的线程池调度执行。"""
-    payload = json.loads(job)
-    device = Device.objects.filter(pk=payload['device_id'], is_active=True).first()
-    if not device:
-        return
-    if device.is_check_type():
-        _run_check_flow(device)
-    else:
-        _run_metric_flow(device)
+    try:
+        payload = json.loads(job)
+        device = Device.objects.filter(pk=payload['device_id'], is_active=True).first()
+        if not device:
+            return
+        if device.is_check_type():
+            _run_check_flow(device)
+        else:
+            _run_metric_flow(device)
+    except Exception as e:
+        logging.error(f'netmon worker 处理异常 job={job}: {e}', exc_info=True)

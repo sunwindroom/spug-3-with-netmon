@@ -139,6 +139,23 @@ class HostView(View):
         return json_response(error=error)
 
 
+@auth('host.host.edit')
+def batch_update_group(request):
+    form, error = JsonParser(
+        Argument('host_ids', type=list, filter=lambda x: len(x), help='请选择主机'),
+        Argument('group_ids', type=list, help='请选择分组'),
+    ).parse(request.body)
+    if error is None:
+        hosts = Host.objects.filter(id__in=form.host_ids)
+        if not request.user.is_supper:
+            permitted = set(get_host_perms(request.user))
+            hosts = hosts.filter(id__in=permitted)
+        for host in hosts:
+            host.groups.set(form.group_ids)
+        return json_response({'updated': hosts.count()})
+    return json_response(error=error)
+
+
 @auth('host.host.add')
 def post_import(request):
     group_id = request.POST.get('group_id')

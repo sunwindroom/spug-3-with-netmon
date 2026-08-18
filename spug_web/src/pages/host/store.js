@@ -23,6 +23,8 @@ class Store {
   @observable cloudImport = null;
   @observable detailVisible = false;
   @observable selectorVisible = false;
+  @observable selectedRowKeys = [];
+  @observable batchGroupVisible = false;
 
   @observable f_word;
   @observable f_status = '';
@@ -146,6 +148,16 @@ class Store {
   showSelector = (addByCopy) => {
     this.addByCopy = addByCopy;
     this.selectorVisible = true;
+  }
+
+  batchUpdateGroup = (group_ids) => {
+    return http.post('/api/host/batch-group/', {host_ids: this.selectedRowKeys, group_ids})
+      .then(() => {
+        message.success('批量调整分组成功');
+        this.selectedRowKeys = [];
+        this.batchGroupVisible = false;
+        this.fetchRecords()
+      })
   }
 
   _handler_counter = (item, counter) => {

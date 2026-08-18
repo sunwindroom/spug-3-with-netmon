@@ -14,6 +14,7 @@ import ComForm from './Form';
 import ComImport from './Import';
 import CloudImport from './CloudImport';
 import BatchSync from './BatchSync';
+import BatchGroup from './BatchGroup';
 import Detail from './Detail';
 import Selector from './Selector';
 import store from './store';
@@ -49,6 +50,7 @@ export default observer(function () {
       {store.importVisible && <ComImport/>}
       {store.cloudImport && <CloudImport/>}
       {store.syncVisible && <BatchSync/>}
+      {store.batchGroupVisible && <BatchGroup/>}
       {store.selectorVisible &&
         <Selector
           mode="group"

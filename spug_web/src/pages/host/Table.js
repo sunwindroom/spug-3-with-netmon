@@ -6,7 +6,7 @@
 import React from 'react';
 import { observer } from 'mobx-react';
 import { Table, Modal, Dropdown, Button, Menu, Avatar, Tooltip, Space, Tag, Radio, Input, message } from 'antd';
-import { PlusOutlined, DownOutlined, SyncOutlined, FormOutlined } from '@ant-design/icons';
+import { PlusOutlined, DownOutlined, SyncOutlined, FormOutlined, TeamOutlined } from '@ant-design/icons';
 import { Action, TableCard, AuthButton, AuthFragment } from 'components';
 import IPAddress from './IPAddress';
 import { http, hasPermission } from 'libs';
@@ -63,6 +63,16 @@ function ComTable() {
       loading={store.isFetching}
       dataSource={store.dataSource}
       onReload={store.fetchRecords}
+      rowSelection={{
+        selectedRowKeys: store.selectedRowKeys,
+        onChange: (keys) => store.selectedRowKeys = keys,
+        preserveSelectedRowKeys: true,
+      }}
+      selected={store.selectedRowKeys}
+      batchActions={[
+        <AuthButton auth="host.host.edit" type="link" icon={<TeamOutlined/>}
+                    onClick={() => store.batchGroupVisible = true}>批量调整分组</AuthButton>,
+      ]}
       actions={[
         <AuthFragment auth="host.host.add">
           <Dropdown overlay={(

@@ -14,6 +14,8 @@ import Reports from './Reports';
 import MaintenanceWindows from './MaintenanceWindows';
 import Remediation from './Remediation';
 import DeviceDetail from './DeviceDetail';
+import NetworkTools from './NetworkTools';
+import ConfigBackup from './ConfigBackup';
 import store from './store';
 
 export default function NetmonIndex() {
@@ -35,6 +37,8 @@ export default function NetmonIndex() {
         <Tabs.TabPane tab="资源台账" key="devices"><Devices/></Tabs.TabPane>
         <Tabs.TabPane tab="维护窗口" key="maintenance"><MaintenanceWindows/></Tabs.TabPane>
         <Tabs.TabPane tab="自动化处置" key="remediation"><Remediation/></Tabs.TabPane>
+        <Tabs.TabPane tab="配置备份" key="config-backup"><ConfigBackup/></Tabs.TabPane>
+        <Tabs.TabPane tab="网络工具箱" key="tools"><NetworkTools/></Tabs.TabPane>
         <Tabs.TabPane tab="自动发现" key="discovery"><Discovery/></Tabs.TabPane>
         <Tabs.TabPane tab="报表管理" key="reports"><Reports/></Tabs.TabPane>
       </Tabs>

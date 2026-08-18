@@ -8,7 +8,7 @@ from django_redis import get_redis_connection
 from libs import json_response, JsonParser, Argument, human_datetime, auth
 from apps.netmon.models import (
     Device, Link, MetricRecord, AlertRule, AnomalyEvent, Report, ReportRecord,
-    MaintenanceWindow, RemediationAction, RemediationLog
+    MaintenanceWindow, RemediationAction, RemediationLog, ConfigBackup
 )
 
 from apps.netmon import discovery, reports as report_builder, stats as stats_builder, collectors, checks
@@ -19,6 +19,7 @@ from statistics import mean
 import json
 import uuid
 import os
+import subprocess
 import csv
 import io
 
@@ -641,3 +642,181 @@ def download_report(request):
         open(record.file_path, 'rb'), as_attachment=True,
         filename=os.path.basename(record.file_path)
     )
+
+
+# ── 网络工具箱 ──
+
+@auth('netmon.device.view')
+def tool_ping(request):
+    form, error = JsonParser(
+        Argument('target', help='请输入目标地址'),
+        Argument('count', type=int, default=4),
+    ).parse(request.body)
+    if error:
+        return json_response(error=error)
+    count = max(1, min(form.count, 20))
+    cmd = f'ping -n {count} -w 1000 {form.target}' if os.name == 'nt' else f'ping -c {count} -W 1 {form.target}'
+    try:
+        task = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=count + 5)
+        return json_response({'exit_code': task.returncode, 'output': task.stdout + task.stderr})
+    except subprocess.TimeoutExpired:
+        return json_response({'exit_code': -1, 'output': 'Ping 执行超时'})
+    except Exception as e:
+        return json_response({'exit_code': -1, 'output': f'执行异常：{e}'})
+
+
+@auth('netmon.device.view')
+def tool_traceroute(request):
+    form, error = JsonParser(
+        Argument('target', help='请输入目标地址'),
+        Argument('max_hops', type=int, default=30),
+    ).parse(request.body)
+    if error:
+        return json_response(error=error)
+    max_hops = max(1, min(form.max_hops, 50))
+    if os.name == 'nt':
+        cmd = f'tracert -d -h {max_hops} {form.target}'
+    else:
+        cmd = f'traceroute -m {max_hops} -w 1 -q 1 {form.target}'
+    try:
+        task = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=max_hops + 10)
+        return json_response({'exit_code': task.returncode, 'output': task.stdout + task.stderr})
+    except subprocess.TimeoutExpired:
+        return json_response({'exit_code': -1, 'output': 'Traceroute 执行超时'})
+    except Exception as e:
+        return json_response({'exit_code': -1, 'output': f'执行异常：{e}'})
+
+
+@auth('netmon.device.view')
+def tool_port_test(request):
+    form, error = JsonParser(
+        Argument('host', help='请输入主机地址'),
+        Argument('port', type=int, help='请输入端口号'),
+        Argument('timeout', type=float, default=3),
+    ).parse(request.body)
+    if error:
+        return json_response(error=error)
+    import socket as _socket
+    try:
+        sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        sock.settimeout(form.timeout)
+        start = datetime.now()
+        result = sock.connect_ex((form.host, form.port))
+        elapsed = round((datetime.now() - start).total_seconds() * 1000, 1)
+        sock.close()
+        if result == 0:
+            return json_response({'reachable': True, 'elapsed_ms': elapsed, 'message': f'端口 {form.port} 开放，耗时 {elapsed}ms'})
+        return json_response({'reachable': False, 'elapsed_ms': elapsed, 'message': f'端口 {form.port} 不可达，错误码 {result}'})
+    except _socket.timeout:
+        return json_response({'reachable': False, 'elapsed_ms': None, 'message': '连接超时'})
+    except Exception as e:
+        return json_response({'reachable': False, 'elapsed_ms': None, 'message': f'异常：{e}'})
+
+
+@auth('netmon.device.view')
+def tool_dns_lookup(request):
+    form, error = JsonParser(
+        Argument('domain', help='请输入域名'),
+        Argument('record_type', default='A'),
+    ).parse(request.body)
+    if error:
+        return json_response(error=error)
+    import socket as _socket
+    try:
+        if form.record_type.upper() in ('A', 'AAAA'):
+            results = _socket.getaddrinfo(form.domain, None)
+            ips = sorted(set(r[4][0] for r in results))
+            return json_response({'records': ips, 'output': '\n'.join(ips)})
+        else:
+            cmd = f'nslookup -type={form.record_type} {form.domain}' if os.name == 'nt' else f'dig {form.domain} {form.record_type} +short'
+            task = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=10)
+            return json_response({'records': [], 'output': task.stdout + task.stderr})
+    except _socket.gaierror as e:
+        return json_response({'records': [], 'output': f'域名解析失败：{e}'})
+    except Exception as e:
+        return json_response({'records': [], 'output': f'异常：{e}'})
+
+
+# ── 设备配置备份 ──
+
+VENDOR_BACKUP_COMMANDS = {
+    'Huawei': 'display current-configuration',
+    'H3C': 'display current-configuration',
+    'Cisco': 'show running-config',
+    'Ruijie': 'show running-config',
+    'ZTE': 'show running-config',
+    'default': 'show running-config',
+}
+
+
+@auth('netmon.device.view')
+def get_config_backups(request):
+    device_id = request.GET.get('device_id')
+    qs = ConfigBackup.objects.all()
+    if device_id:
+        qs = qs.filter(device_id=device_id)
+    return json_response([x.to_view() for x in qs[:200]])
+
+
+@auth('netmon.device.edit')
+def trigger_config_backup(request):
+    form, error = JsonParser(
+        Argument('device_id', type=int, help='参数错误'),
+    ).parse(request.body)
+    if error:
+        return json_response(error=error)
+    device = Device.objects.filter(pk=form.device_id).first()
+    if not device:
+        return json_response(error='设备不存在')
+    if not device.host_id:
+        return json_response(error='设备未关联主机，无法通过SSH采集配置')
+    from libs.ssh_executor import ssh_exec
+    vendor = device.extra.get('vendor', '') if isinstance(device.extra, dict) else ''
+    command = VENDOR_BACKUP_COMMANDS.get(vendor, VENDOR_BACKUP_COMMANDS['default'])
+    exit_code, output = ssh_exec(device.host, command, retries=1)
+    if exit_code != 0:
+        return json_response(error=f'配置采集失败：{output[:500]}')
+    import hashlib
+    config_text = output.strip()
+    config_hash = hashlib.md5(config_text.encode()).hexdigest()
+    last = ConfigBackup.objects.filter(device=device).first()
+    if last and last.config_hash == config_hash:
+        return json_response({'message': '配置未变化，跳过存储', 'hash': config_hash, 'changed': False})
+    backup = ConfigBackup.objects.create(
+        device=device, config_text=config_text, config_hash=config_hash,
+        config_size=len(config_text), is_auto=False, created_by=request.user
+    )
+    return json_response({'message': '配置备份成功', 'id': backup.id, 'hash': config_hash, 'changed': True, 'size': len(config_text)})
+
+
+@auth('netmon.device.view')
+def get_config_backup_detail(request):
+    backup_id = request.GET.get('id')
+    backup = ConfigBackup.objects.filter(pk=backup_id).first()
+    if not backup:
+        return json_response(error='备份记录不存在')
+    return json_response({'id': backup.id, 'device_name': backup.device.name, 'config_text': backup.config_text, 'created_at': backup.created_at, 'config_hash': backup.config_hash})
+
+
+@auth('netmon.device.view')
+def diff_config_backups(request):
+    form, error = JsonParser(
+        Argument('base_id', type=int, help='请选择基准版本'),
+        Argument('compare_id', type=int, help='请选择对比版本'),
+    ).parse(request.body)
+    if error:
+        return json_response(error=error)
+    base = ConfigBackup.objects.filter(pk=form.base_id).first()
+    compare = ConfigBackup.objects.filter(pk=form.compare_id).first()
+    if not base or not compare:
+        return json_response(error='备份记录不存在')
+    import difflib
+    base_lines = base.config_text.splitlines(keepends=True)
+    compare_lines = compare.config_text.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(base_lines, compare_lines, fromfile=f'基准 {base.created_at}', tofile=f'对比 {compare.created_at}', lineterm=''))
+    return json_response({
+        'diff': '\n'.join(diff),
+        'is_same': base.config_hash == compare.config_hash,
+        'base_at': base.created_at,
+        'compare_at': compare.created_at,
+    })

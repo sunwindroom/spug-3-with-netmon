@@ -343,3 +343,25 @@ class ReportRecord(models.Model, ModelMixin):
     class Meta:
         db_table = 'netmon_report_records'
         ordering = ('-id',)
+
+
+class ConfigBackup(models.Model, ModelMixin):
+    """设备配置备份：定期通过 SSH/Telnet 采集网络设备运行配置并存储，
+    支持历史版本对比(diff)，快速发现非授权变更，满足安全合规审计要求。"""
+    device = models.ForeignKey(Device, models.CASCADE, related_name='config_backups')
+    config_text = models.TextField()
+    config_hash = models.CharField(max_length=64)
+    config_size = models.IntegerField(default=0)
+    is_auto = models.BooleanField(default=False, help_text='True=计划任务自动备份, False=手动触发')
+    created_at = models.CharField(max_length=20, default=human_datetime)
+    created_by = models.ForeignKey(User, models.PROTECT, null=True, related_name='+')
+
+    def to_view(self):
+        tmp = self.to_dict(excludes=('config_text',))
+        tmp['device_name'] = self.device.name
+        tmp['device_ip'] = self.device.ip
+        return tmp
+
+    class Meta:
+        db_table = 'netmon_config_backups'
+        ordering = ('-id',)

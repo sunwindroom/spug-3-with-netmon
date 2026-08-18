@@ -25,4 +25,12 @@ urlpatterns = [
     path('report/generate/', views.generate_report),
     path('report/record/', views.get_report_records),
     path('report/download/', views.download_report),
+    path('tools/ping/', views.tool_ping),
+    path('tools/traceroute/', views.tool_traceroute),
+    path('tools/port-test/', views.tool_port_test),
+    path('tools/dns-lookup/', views.tool_dns_lookup),
+    path('config-backup/', views.get_config_backups),
+    path('config-backup/trigger/', views.trigger_config_backup),
+    path('config-backup/detail/', views.get_config_backup_detail),
+    path('config-backup/diff/', views.diff_config_backups),
 ]

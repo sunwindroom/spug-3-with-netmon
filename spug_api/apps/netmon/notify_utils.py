@@ -19,6 +19,7 @@ from django_redis import get_redis_connection
 from django.db import close_old_connections
 from apps.alarm.models import Alarm
 from libs.spug import Notification
+import hashlib
 import json
 import time
 
@@ -54,7 +55,8 @@ def _should_converge(target, type_alias):
     """告警收敛：同一 target+type 在 CONVERGE_WINDOW 秒内已推送过则返回 True。"""
     try:
         rds = get_redis_connection()
-        key = CONVERGE_KEY.format(hash(target), hash(type_alias))
+        digest = hashlib.md5(f'{target}:{type_alias}'.encode()).hexdigest()
+        key = CONVERGE_KEY.format(digest[:16], digest[16:32])
         return not rds.set(key, 1, nx=True, ex=CONVERGE_WINDOW)
     except Exception:
         return False

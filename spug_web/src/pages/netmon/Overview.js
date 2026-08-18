@@ -24,14 +24,14 @@ const STATUS_LABEL = { online: '正常', warning: '告警', critical: '严重', 
 const LEVEL_COLOR = { info: 'blue', warning: 'orange', critical: 'red' };
 
 const TYPE_META = {
-  '1': { icon: <ApiOutlined/>, sub: '监控网站、接口', gradient: 'linear-gradient(135deg,#4facfe,#00c6fb)' },
-  '2': { icon: <ApartmentOutlined/>, sub: '监控服务端口', gradient: 'linear-gradient(135deg,#f7797d,#fbd3e9)' },
-  '3': { icon: <ClusterOutlined/>, sub: '监控业务进程、中间件', gradient: 'linear-gradient(135deg,#43cea2,#185a9d)' },
-  '4': { icon: <CodeOutlined/>, sub: '自定义脚本，灵活扩展', gradient: 'linear-gradient(135deg,#a18cd1,#fbc2eb)' },
-  '5': { icon: <WifiOutlined/>, sub: '网络设备、网关探测', gradient: 'linear-gradient(135deg,#30cfd0,#330867)' },
-  '6': { icon: <BorderOuterOutlined/>, sub: '容器监控', gradient: 'linear-gradient(135deg,#0093E9,#80D0C7)' },
-  '7': { icon: <DatabaseOutlined/>, sub: '数据库监听探测', gradient: 'linear-gradient(135deg,#5f72bd,#9b23ea)' },
-  '8': { icon: <FileSearchOutlined/>, sub: '日志文件监控', gradient: 'linear-gradient(135deg,#f857a6,#ff5858)' },
+  'http': { icon: <ApiOutlined/>, sub: '监控网站、接口', gradient: 'linear-gradient(135deg,#4facfe,#00c6fb)' },
+  'port': { icon: <ApartmentOutlined/>, sub: '监控服务端口', gradient: 'linear-gradient(135deg,#f7797d,#fbd3e9)' },
+  'process': { icon: <ClusterOutlined/>, sub: '监控业务进程、中间件', gradient: 'linear-gradient(135deg,#43cea2,#185a9d)' },
+  'shell': { icon: <CodeOutlined/>, sub: '自定义脚本，灵活扩展', gradient: 'linear-gradient(135deg,#a18cd1,#fbc2eb)' },
+  'ping_check': { icon: <WifiOutlined/>, sub: '网络设备、网关探测', gradient: 'linear-gradient(135deg,#30cfd0,#330867)' },
+  'docker': { icon: <BorderOuterOutlined/>, sub: '容器监控', gradient: 'linear-gradient(135deg,#0093E9,#80D0C7)' },
+  'database': { icon: <DatabaseOutlined/>, sub: '数据库监听探测', gradient: 'linear-gradient(135deg,#5f72bd,#9b23ea)' },
+  'log': { icon: <FileSearchOutlined/>, sub: '日志文件监控', gradient: 'linear-gradient(135deg,#f857a6,#ff5858)' },
 };
 
 function TypeCard({ item }) {

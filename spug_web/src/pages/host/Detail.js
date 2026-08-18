@@ -124,6 +124,10 @@ export default observer(function () {
         <Descriptions.Item label="主机名称">{host.name}</Descriptions.Item>
         <Descriptions.Item label="连接地址">{host.username}@{host.hostname}</Descriptions.Item>
         <Descriptions.Item label="连接端口">{host.port}</Descriptions.Item>
+        <Descriptions.Item label="登录账号">{host.username}</Descriptions.Item>
+        <Descriptions.Item label="登录密码">
+          {host.password ? <Input.Password value={host.password} readOnly style={{width: 200}}/> : '未登记'}
+        </Descriptions.Item>
         <Descriptions.Item label="独立密钥">{host.pkey ? '是' : '否'}</Descriptions.Item>
         <Descriptions.Item label="描述信息">{host.desc}</Descriptions.Item>
         <Descriptions.Item label="所属分组">

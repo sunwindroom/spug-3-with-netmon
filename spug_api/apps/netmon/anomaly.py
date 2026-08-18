@@ -41,7 +41,7 @@ def check_threshold_rules(device, metric_key, value):
         if hit:
             count = rds.incr(counter_key)
             rds.expire(counter_key, 3600)
-            if count >= rule.consecutive_times:
+            if count == rule.consecutive_times:
                 message = f'{device.name}({device.ip}) 指标[{metric_key}] 当前值 {value} {rule.operator} {rule.threshold}，已连续 {count} 次触发规则「{rule.name}」'
                 event = AnomalyEvent.objects.create(
                     device=device, metric_key=metric_key, value=value, baseline=rule.threshold,
@@ -70,6 +70,11 @@ def models_q_device_or_group(device):
 def check_dynamic_baseline(device, metric_key, value):
     """3-sigma 动态基线检测，覆盖没有配置静态阈值规则的指标"""
     from apps.netmon.notify_utils import dispatch_alarm_notify
+    existing = AnomalyEvent.objects.filter(
+        device=device, metric_key=metric_key, method='3sigma', status='open'
+    ).first()
+    if existing:
+        return None
     history = list(
         MetricRecord.objects.filter(device=device, metric_key=metric_key)
         .order_by('-collected_at').values_list('value', flat=True)[:BASELINE_WINDOW]

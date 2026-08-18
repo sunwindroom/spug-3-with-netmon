@@ -6,6 +6,7 @@ from libs import json_response, JsonParser, Argument, auth
 from libs.spug import Notification
 from libs.push import get_contacts
 from apps.alarm.models import Alarm, Group, Contact
+from apps.netmon.models import Device
 from apps.setting.utils import AppSetting
 import json
 
@@ -46,9 +47,9 @@ class GroupView(View):
             Argument('id', type=int, help='请指定操作对象')
         ).parse(request.GET)
         if error is None:
-            detection = Detection.objects.filter(notify_grp__regex=fr'[^0-9]{form.id}[^0-9]').first()
-            if detection:
-                return json_response(error=f'监控任务【{detection.name}】正在使用该报警组，请解除关联后再尝试删除该联系组')
+            device = Device.objects.filter(notify_grp__contains=f'"{form.id}"').first()
+            if device:
+                return json_response(error=f'监控设备【{device.name}】正在使用该报警组，请解除关联后再尝试删除该联系组')
             Group.objects.filter(pk=form.id).delete()
         return json_response(error=error)
 

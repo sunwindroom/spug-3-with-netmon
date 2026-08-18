@@ -14,6 +14,7 @@ class Host(models.Model, ModelMixin):
     hostname = models.CharField(max_length=50)
     port = models.IntegerField(null=True)
     username = models.CharField(max_length=50)
+    password = models.CharField(max_length=255, null=True, blank=True)
     pkey = models.TextField(null=True)
     desc = models.CharField(max_length=255, null=True)
     is_verified = models.BooleanField(default=False)

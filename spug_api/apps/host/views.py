@@ -52,6 +52,9 @@ class HostView(View):
             extend_data = getattr(form, '_extend', None)
             if hasattr(form, '_extend'):
                 del form._extend
+            saved_password = getattr(form, '_saved_password', None)
+            if hasattr(form, '_saved_password'):
+                del form._saved_password
             other = Host.objects.filter(name=form.name).first()
             if other and (not form.id or other.id != form.id):
                 return json_response(error=f'已存在的主机名称【{form.name}】')
@@ -60,6 +63,9 @@ class HostView(View):
                 host = Host.objects.get(pk=form.id)
             else:
                 host = Host.objects.create(created_by=request.user, is_verified=True, **form)
+            if saved_password:
+                host.password = saved_password
+                host.save(update_fields=['password'])
             host.groups.set(group_ids)
             if extend_data:
                 _sync_host_extend(host, extend_data=extend_data)
@@ -203,6 +209,7 @@ def batch_valid(request):
 def _do_host_verify(form):
     from apps.host.utils import fetch_host_extend
     password = form.pop('password')
+    form._saved_password = password
     if form.pkey:
         try:
             with SSH(form.hostname, form.port, form.username, form.pkey) as ssh:

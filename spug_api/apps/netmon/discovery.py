@@ -32,8 +32,11 @@ PORT_HINTS = (
 def _is_alive(ip):
     system = platform.system().lower()
     cmd = f'ping -n 1 -w 800 {ip}' if system == 'windows' else f'ping -c 1 -W 1 {ip}'
-    task = subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return task.returncode == 0
+    try:
+        task = subprocess.run(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        return task.returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
 
 
 def _probe_port(ip, port, timeout=0.6):

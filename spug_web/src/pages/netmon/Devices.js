@@ -26,8 +26,9 @@ const METRIC_TYPE_OPTIONS = [
   ['ping', 'Ping探测（时延/丢包）'],
   ['snmp', 'SNMP采集（网络设备CPU/内存/流量）'],
   ['agent', 'Agent采集（复用主机SSH凭据）'],
-  ['script', '自定义采集脚本（数值型，通过SSH执行）'],
 ];
+// 已有 script 类型设备编辑时需保留该选项以兼容存量数据
+const SCRIPT_OPTION = ['script', '自定义采集脚本（数值型，通过SSH执行）'];
 // 可用性检测类型：合并自原"监控中心"模块，走连续失败阈值 + 静默期告警
 const CHECK_TYPE_OPTIONS = [
   ['http', 'HTTP/站点检测'],
@@ -308,7 +309,8 @@ export function DeviceForm({ groupId }) {
         <Form.Item name="monitor_type" label="监控方式" initialValue="ping" rules={[{ required: true }]}>
           <Select>
             <Select.OptGroup label="指标采集（数值趋势 + 动态基线异常检测）">
-              {METRIC_TYPE_OPTIONS.map(([v, l]) => <Select.Option key={v} value={v}>{l}</Select.Option>)}
+              {(record.monitor_type === 'script' ? [...METRIC_TYPE_OPTIONS, SCRIPT_OPTION] : METRIC_TYPE_OPTIONS)
+                .map(([v, l]) => <Select.Option key={v} value={v}>{l}</Select.Option>)}
             </Select.OptGroup>
             <Select.OptGroup label="可用性检测（是/否正常，连续失败达阈值告警）">
               {CHECK_TYPE_OPTIONS.map(([v, l]) => <Select.Option key={v} value={v}>{l}</Select.Option>)}
